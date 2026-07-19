@@ -740,6 +740,39 @@ if st.session_state.tab == "load":
         ok, f0 = read_frame(st.session_state.video_path, 0)
         if ok:
             st.image(cv2.cvtColor(f0, cv2.COLOR_BGR2RGB), use_container_width=True, caption="Preview")
+        # Check for existing exported results for this video and offer to load them
+        video_dir_name = os.path.splitext(st.session_state.video_name)[0].replace(" ", "_")
+        export_dir = os.path.join("results", video_dir_name)
+        existing_csv = None
+        if os.path.exists(export_dir):
+            for f in os.listdir(export_dir):
+                if f.startswith("bee_track_") and f.endswith(".csv"):
+                    existing_csv = os.path.join(export_dir, f)
+                    break
+
+        if existing_csv:
+            st.info(f"Results already present for this video in {export_dir}.")
+            load_col, _ = st.columns([1, 3])
+            with load_col:
+                if st.button("Load existing results", key=f"load_results_{video_dir_name}"):
+                    try:
+                        df_existing = pd.read_csv(existing_csv)
+                        st.session_state.processed_df = df_existing
+                        # store track coords as list of records (compatible with exports)
+                        st.session_state.track_coords = df_existing.to_dict("records")
+                        # set entry/exit frames if available
+                        if "tag_type" in df_existing.columns:
+                            entries = df_existing[df_existing["tag_type"] == "entry"]["frame"]
+                            exits = df_existing[df_existing["tag_type"] == "exit"]["frame"]
+                            if not entries.empty:
+                                st.session_state.entry_frame = int(entries.iloc[0])
+                            if not exits.empty:
+                                st.session_state.exit_frame = int(exits.iloc[-1])
+                        st.session_state.track_phase = "complete"
+                        st.success("Loaded existing results into session state.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to load existing results: {e}")
         if st.button("Next: Calibrate arena →", type="primary"):
             st.session_state.tab = "calibrate"
             st.rerun()
