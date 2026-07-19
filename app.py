@@ -1155,9 +1155,13 @@ elif st.session_state.tab == "analysis":
     # 2. Lookup calibration data in results folder
     intensity = "unknown"
     hdr = "unknown"
+    xhdr = "unknown"
+    xdop = "unknown"
+    x_val = "unknown"
+    edge_intensity = "unknown"
     
     csv_path = None
-    results_dir = "results"
+    results_dir = "calibrations"
     if os.path.exists(results_dir):
         for f in os.listdir(results_dir):
             if f.startswith("extended_bbcalibrations") and f.endswith(".csv"):
@@ -1175,16 +1179,45 @@ elif st.session_state.tab == "analysis":
                     row_stim_norm = f"p{float(row_stim_m.group(1)):.1f}u{float(row_stim_m.group(2)):.1f}"
                 else:
                     row_stim_norm = row_stim
-                
+
                 row_ori = str(row.get("orientation", "")).strip().upper()
                 if row_stim_norm == target_stim and row_ori == orientation:
-                    intensity = str(row.get("intensity", "unknown")).strip()
+                    # extract and format calibration fields
+                    intensity_raw = row.get("intensity", "unknown")
+                    intensity = str(intensity_raw).strip() if pd.notna(intensity_raw) else "unknown"
+
                     hdr_raw = row.get("hdr", None)
                     if pd.notna(hdr_raw):
                         try:
                             hdr = f"{float(hdr_raw):.4f}"
-                        except ValueError:
+                        except Exception:
                             hdr = str(hdr_raw)
+
+                    # other calibration columns
+                    try:
+                        xhdr_raw = row.get("xhdr", None)
+                        xhdr = f"{float(xhdr_raw):.4f}" if pd.notna(xhdr_raw) else "unknown"
+                    except Exception:
+                        xhdr = str(row.get("xhdr", "unknown"))
+
+                    try:
+                        xdop_raw = row.get("xdop", None)
+                        xdop = f"{float(xdop_raw):.4f}" if pd.notna(xdop_raw) else "unknown"
+                    except Exception:
+                        xdop = str(row.get("xdop", "unknown"))
+
+                    try:
+                        x_raw = row.get("x", None)
+                        x_val = f"{float(x_raw):.4f}" if pd.notna(x_raw) else "unknown"
+                    except Exception:
+                        x_val = str(row.get("x", "unknown"))
+
+                    try:
+                        edge_raw = row.get("edge intensity (L/R)", None)
+                        edge_intensity = f"{float(edge_raw):.4f}" if pd.notna(edge_raw) else str(edge_raw).strip()
+                    except Exception:
+                        edge_intensity = str(row.get("edge intensity (L/R)", "unknown"))
+
                     break
         except Exception:
             pass
@@ -1192,8 +1225,22 @@ elif st.session_state.tab == "analysis":
     # 3. Create heading
     if p_val and u_val:
         heading = f"Bee Trajectory - ID: {bee_id} | Stimulus: p{p_val} u{u_val} | Ori: {orientation}"
-        if intensity != "unknown" or hdr != "unknown":
-            heading += f" (Intensity: {intensity}, HDR: {hdr})"
+        # append calibration metadata when available
+        meta_parts = []
+        if x_val != "unknown":
+            meta_parts.append(f"x={x_val}")
+        if xdop != "unknown":
+            meta_parts.append(f"xdop={xdop}")
+        if xhdr != "unknown":
+            meta_parts.append(f"xhdr={xhdr}")
+        if hdr != "unknown":
+            meta_parts.append(f"hdr={hdr}")
+        if intensity != "unknown":
+            meta_parts.append(f"intensity={intensity}")
+        if edge_intensity != "unknown":
+            meta_parts.append(f"edge_intensity={edge_intensity}")
+        if meta_parts:
+            heading += " (" + ", ".join(meta_parts) + ")"
     else:
         heading = f"Bee Trajectory - ID: {bee_id} | Video: {os.path.splitext(video_name)[0]}"
 
@@ -1208,9 +1255,16 @@ elif st.session_state.tab == "analysis":
 
     fps = st.session_state.tracking_fps
     df = build_processed_df(st.session_state.track_coords, fps, st.session_state.feeder_radius_mm)
-    # Add Bee ID and Trial Outcome columns to the CSV
+    # Add Bee ID, Trial Outcome and calibration metadata columns to the CSV
     df["bee_id"] = bee_id
     df["trial_outcome"] = outcome_str
+    df["orientation"] = orientation
+    df["x"] = x_val
+    df["xdop"] = xdop
+    df["xhdr"] = xhdr
+    df["hdr"] = hdr
+    df["intensity"] = intensity
+    df["edge_intensity"] = edge_intensity
     st.session_state.processed_df = df
 
     step = df["frame"].diff().dropna().median() if len(df) > 1 else 1
@@ -1274,8 +1328,12 @@ elif st.session_state.tab == "analysis":
     csv_export_path = os.path.join(export_dir, f"bee_track_{os.path.splitext(video_name)[0]}.csv")
     png_export_path = os.path.join(export_dir, f"trajectory_{os.path.splitext(video_name)[0]}.png")
     
+    # Save CSV with calibration metadata
     df.to_csv(csv_export_path, index=False)
     fig.savefig(png_export_path, dpi=200, bbox_inches="tight")
+    # Also save a 'complete trajectory' copy that includes full metadata in the title
+    complete_png_path = os.path.join(export_dir, f"complete_trajectory_{os.path.splitext(video_name)[0]}.png")
+    fig.savefig(complete_png_path, dpi=300, bbox_inches="tight")
 
     if st.session_state.bee_went_back is not None:
         with open(os.path.join(export_dir, "trial_outcome.txt"), "w") as f:
