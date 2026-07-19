@@ -486,32 +486,44 @@ def generate_tracked_video(video_path, coords, entry_frame, exit_frame, output_p
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return False
-
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    
+
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-    
-    coords_sorted = sorted(coords, key=lambda c: c["frame"])
-    entry_f = entry_frame if entry_frame is not None else 0
-    exit_f = exit_frame if exit_frame is not None else int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) - 1
-    
+
+    coords_sorted = sorted(coords, key=lambda c: c["frame"]) if coords else []
+
+    # Use tracked coordinates range as fallback so we don't accidentally truncate the preview
+    if coords_sorted:
+        coords_min = int(coords_sorted[0]["frame"])
+        coords_max = int(coords_sorted[-1]["frame"])
+    else:
+        coords_min, coords_max = 0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) - 1
+
+    entry_f = int(entry_frame) if entry_frame is not None else coords_min
+    exit_f = int(exit_frame) if exit_frame is not None else coords_max
+
+    # Clamp to video frame count
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    entry_f = max(0, min(entry_f, total_frames - 1))
+    exit_f = max(0, min(exit_f, total_frames - 1))
+
     cap.set(cv2.CAP_PROP_POS_FRAMES, entry_f)
-    
+
     for f_idx in range(entry_f, exit_f + 1):
         ret, frame = cap.read()
         if not ret:
             break
-            
+
         vis = draw_calibration_overlay(frame, circle_center[0], circle_center[1], circle_radius)
-        
+
         coords_up_to_frame = [c for c in coords_sorted if c["frame"] <= f_idx]
         if len(coords_up_to_frame) > 1:
             pts = np.array([[int(c["x_pixel"]), int(c["y_pixel"])] for c in coords_up_to_frame], np.int32).reshape((-1, 1, 2))
             cv2.polylines(vis, [pts], False, (0, 200, 255), 2)
-            
+
         for c in coords_up_to_frame:
             if c.get("tag_type") == "entry":
                 cv2.drawMarker(vis, (int(c["x_pixel"]), int(c["y_pixel"])), (42, 157, 143), cv2.MARKER_TILTED_CROSS, 18, 2)
@@ -519,7 +531,7 @@ def generate_tracked_video(video_path, coords, entry_frame, exit_frame, output_p
             elif c.get("tag_type") == "exit":
                 cv2.drawMarker(vis, (int(c["x_pixel"]), int(c["y_pixel"])), (230, 57, 70), cv2.MARKER_TILTED_CROSS, 18, 2)
                 cv2.putText(vis, "EXIT", (int(c["x_pixel"]) + 10, int(c["y_pixel"]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (230, 57, 70), 2)
-                
+
         coord_at_cur = next((c for c in coords_up_to_frame if c["frame"] == f_idx), None)
         if coord_at_cur:
             cx, cy = int(coord_at_cur["x_pixel"]), int(coord_at_cur["y_pixel"])
@@ -527,9 +539,9 @@ def generate_tracked_video(video_path, coords, entry_frame, exit_frame, output_p
             col = (0, 255, 0) if status in ("ok", "idle") else (0, 180, 255) if status == "manual" else (0, 80, 255)
             cv2.circle(vis, (cx, cy), 8, col, -1)
             cv2.circle(vis, (cx, cy), 14, col, 2)
-            
+
         out.write(vis)
-        
+
     cap.release()
     out.release()
     return True
@@ -1334,6 +1346,17 @@ elif st.session_state.tab == "analysis":
     # Also save a 'complete trajectory' copy that includes full metadata in the title
     complete_png_path = os.path.join(export_dir, f"complete_trajectory_{os.path.splitext(video_name)[0]}.png")
     fig.savefig(complete_png_path, dpi=300, bbox_inches="tight")
+
+    # Export zone transitions and manual help points as separate CSVs (if present)
+    trans = df[df["transition_event"].notna()][["frame", "time_sec", "transition_event"]]
+    trans_csv_path = os.path.join(export_dir, f"zone_transitions_{os.path.splitext(video_name)[0]}.csv")
+    if len(trans):
+        trans.to_csv(trans_csv_path, index=False)
+
+    help_tags = df[df["tag_type"] == "help"][['frame', 'time_sec', 'x_mm', 'y_mm']]
+    help_csv_path = os.path.join(export_dir, f"help_points_{os.path.splitext(video_name)[0]}.csv")
+    if len(help_tags):
+        help_tags.to_csv(help_csv_path, index=False)
 
     if st.session_state.bee_went_back is not None:
         with open(os.path.join(export_dir, "trial_outcome.txt"), "w") as f:
