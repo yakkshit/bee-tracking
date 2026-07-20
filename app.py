@@ -445,19 +445,55 @@ def build_processed_df(coords, fps, feeder_mm):
     return pd.DataFrame(records)
 
 
-def plot_trajectory(df, entry_frame=None, exit_frame=None, title="Bee Trajectory", bee_id="unknown", outcome="Unknown"):
+def plot_trajectory(df, entry_frame=None, exit_frame=None, title="Bee Trajectory", bee_id="unknown", outcome="Unknown", hive_entry_mm=None):
     fig, ax = plt.subplots(figsize=(8, 8), facecolor="white")
     ax.add_patch(plt.Circle((0, 0), OUTER_RADIUS_MM, fill=False, color="#ccc", lw=2, label="Outer (42 cm)"))
     ax.add_patch(plt.Circle((0, 0), INNER_RADIUS_MM, fill=False, color="#aaa", lw=1.5, ls="--", label="Inner (21 cm)"))
     x_mm, y_mm, t_sec = df["x_mm"].values, df["y_mm"].values, df["time_sec"].values
+
+    # Plot Hive Entry location if available (in mm coordinates)
+    if hive_entry_mm is not None:
+        hx_mm, hy_mm = hive_entry_mm
+        ax.plot(hx_mm, hy_mm, "*", color="#2ecc71", ms=14, mew=1.5, mec="#1a7a42", label="Hive Entry")
+        ax.annotate("HIVE", (hx_mm, hy_mm), textcoords="offset points",
+                     xytext=(12, 8), fontsize=9, fontweight="bold", color="#1a7a42",
+                     bbox=dict(boxstyle='round,pad=0.15', facecolor='white', edgecolor='#2ecc71', alpha=0.7))
+
     if len(x_mm) >= 2:
         pts = np.array([x_mm, y_mm]).T.reshape(-1, 1, 2)
         segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
         norm = plt.Normalize(t_sec.min(), t_sec.max())
-        lc = LineCollection(segs, cmap="viridis", norm=norm, linewidth=2.5)
+        # Use 'turbo' colormap for more vibrant, clearly visible time progression
+        lc = LineCollection(segs, cmap="turbo", norm=norm, linewidth=3.0)
         lc.set_array(t_sec)
         ax.add_collection(lc)
-        fig.colorbar(lc, ax=ax, shrink=0.8, label="Time (s)")
+        cbar = fig.colorbar(lc, ax=ax, shrink=0.8, label="Time (s)")
+        cbar.ax.yaxis.label.set_fontweight("bold")
+
+        # Add time progress markers at 25%, 50%, 75% along the trajectory
+        n = len(x_mm)
+        for pct, marker_style, marker_color in [
+            (0.25, "o", "#FFD700"),   # Gold at 25%
+            (0.50, "s", "#FF8C00"),   # Dark Orange at 50%
+            (0.75, "D", "#FF4500"),   # Orange Red at 75%
+        ]:
+            idx = int(n * pct)
+            if idx < n:
+                t_val = t_sec[idx]
+                ax.plot(x_mm[idx], y_mm[idx], marker_style, color=marker_color, ms=7,
+                        mec="black", mew=0.5, zorder=5)
+                ax.annotate(f"{t_val:.1f}s", (x_mm[idx], y_mm[idx]),
+                            textcoords="offset points", xytext=(6, 6),
+                            fontsize=7.5, fontweight="bold", color=marker_color,
+                            bbox=dict(boxstyle='round,pad=0.1', facecolor='white', edgecolor=marker_color, alpha=0.7))
+
+        # Add a direction arrow at the end of the path
+        if n >= 4:
+            dx = x_mm[-1] - x_mm[-3]
+            dy = y_mm[-1] - y_mm[-3]
+            ax.arrow(x_mm[-3], y_mm[-3], dx * 0.3, dy * 0.3,
+                     head_width=12, head_length=8, fc="#E63946", ec="#E63946",
+                     alpha=0.7, zorder=6, label="Direction")
     ax.plot(x_mm[0], y_mm[0], "^", color="#2A9D8F", ms=10, label="Entry")
     ax.plot(x_mm[-1], y_mm[-1], "X", color="#E63946", ms=10, label="Exit")
     ax.plot(0, 0, "o", color="#FB8500", ms=10, label="Feeder")
@@ -467,7 +503,7 @@ def plot_trajectory(df, entry_frame=None, exit_frame=None, title="Bee Trajectory
     ax.grid(True, ls=":", alpha=0.4)
     ax.set_xlabel("X (mm)")
     ax.set_ylabel("Y (mm)")
-    ax.set_title(title)
+    ax.set_title(title, fontweight="bold")
     
     # Overlay metadata text box inside the plot
     textstr = f"Bee ID: {bee_id}\nOutcome: {outcome}"
@@ -582,7 +618,7 @@ def apply_point_tag(px, py, tag_mode, frame, fps):
     if tag_mode == "entry":
         st.session_state.entry_frame = cur
         st.session_state.entry_point = (cx, cy)
-        st.session_state.track_coords = []
+        st.session_state.track_coords = [c for c in st.session_state.track_coords if c["frame"] >= cur]
         st.session_state.track_state = init_track_state(frame, bbox)
         st.session_state.track_state["frame_idx"] = cur
         upsert_coord(make_coord(cur, cx, cy, fps, tag_type="entry", status="manual"))
@@ -642,6 +678,9 @@ DEFAULTS = {
     "tab": "load",
     "video_path": None,
     "video_name": "",
+    "video_folder": "",
+    "local_videos": [],
+    "selected_video_index": None,
     "circle_center": None,
     "circle_radius": None,
     "inner_circle_center": None,
@@ -687,6 +726,8 @@ settings = {**TRACK_SETTINGS, "feeder_radius_mm": st.session_state.feeder_radius
 # Top navigation
 # ---------------------------------------------------------------------------
 st.title("🐝 Bee Arena Tracker")
+if st.session_state.video_name:
+    st.markdown(f"**Current video:** `{st.session_state.video_name}`")
 tabs = {"load": "1 · Video", "calibrate": "2 · Calibrate", "track": "3 · Track", "analysis": "4 · Analysis"}
 tab_keys = list(tabs.keys())
 tab_labels = [tabs[k] for k in tab_keys]
@@ -716,19 +757,81 @@ st.session_state.tab = choice
 # ===================================================================
 if st.session_state.tab == "load":
     st.subheader("Load your arena video")
+    st.info("Select a local video file or folder path. Videos are not uploaded to Streamlit.")
     workspace_video = "2024-11-17 17-04-16.R13.LR.P0U8.mp4"
-    use_ws = os.path.exists(workspace_video) and st.checkbox(f"Use `{workspace_video}`", value=True)
-    if use_ws:
-        st.session_state.video_path = workspace_video
-        st.session_state.video_name = workspace_video
-    else:
-        up = st.file_uploader("Upload .mp4 / .mov", type=["mp4", "avi", "mov"])
-        if up:
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-            tmp.write(up.read())
-            tmp.close()
-            st.session_state.video_path = tmp.name
-            st.session_state.video_name = up.name
+    if os.path.exists(workspace_video):
+        if st.checkbox(f"Use `{workspace_video}`", value=False):
+            st.session_state.video_path = workspace_video
+            st.session_state.video_name = workspace_video
+            st.session_state.selected_video_index = None
+
+    upload_file = st.file_uploader(
+        "Or upload a single video file",
+        type=["mp4", "avi", "mov"],
+        accept_multiple_files=False,
+    )
+    if upload_file is not None:
+        suffix = os.path.splitext(upload_file.name)[1] or ".mp4"
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        tmp.write(upload_file.read())
+        tmp.close()
+        st.session_state.video_path = tmp.name
+        st.session_state.video_name = upload_file.name
+        st.session_state.video_folder = ""
+        st.session_state.local_videos = []
+        st.session_state.selected_video_index = None
+
+    path_input = st.text_input(
+        "Local folder or video file path",
+        value=st.session_state.video_folder,
+        placeholder="Enter folder path containing videos or a single video file path",
+    )
+    if path_input != st.session_state.video_folder:
+        st.session_state.video_folder = path_input
+        st.session_state.local_videos = []
+        st.session_state.selected_video_index = None
+        st.session_state.video_path = None
+        st.session_state.video_name = ""
+
+    if st.button("Refresh file list"):
+        st.session_state.local_videos = []
+        st.session_state.selected_video_index = None
+
+    if st.session_state.video_folder:
+        folder = st.session_state.video_folder
+        if os.path.isdir(folder):
+            found = sorted(
+                [f for f in os.listdir(folder) if os.path.splitext(f)[1].lower() in {".mp4", ".mov", ".avi"}]
+            )
+            st.session_state.local_videos = [
+                {"name": f, "path": os.path.join(folder, f)} for f in found
+            ]
+        elif os.path.isfile(folder):
+            st.session_state.local_videos = [{"name": os.path.basename(folder), "path": folder}]
+        else:
+            st.warning("Path is not an existing folder or file. Please enter a valid local path.")
+
+    if st.session_state.local_videos:
+        file_options = []
+        for video in st.session_state.local_videos:
+            video_dir_name = os.path.splitext(video["name"])[0].replace(" ", "_")
+            export_dir = os.path.join("results", video_dir_name)
+            tracked = os.path.exists(export_dir) and any(
+                f.startswith("bee_track_") and f.endswith(".csv") for f in os.listdir(export_dir)
+            )
+            label = f"{video['name']} {'✅ already tracked' if tracked else '• new'}"
+            file_options.append(label)
+
+        choice_index = st.selectbox(
+            "Choose a video to work with",
+            list(range(len(file_options))),
+            format_func=lambda i: file_options[i],
+            index=st.session_state.selected_video_index if st.session_state.selected_video_index is not None else 0,
+        )
+        st.session_state.selected_video_index = choice_index
+        selected_video = st.session_state.local_videos[choice_index]
+        st.session_state.video_path = selected_video["path"]
+        st.session_state.video_name = selected_video["name"]
 
     if st.session_state.video_path:
         meta = video_meta(st.session_state.video_path)
@@ -1323,7 +1426,18 @@ elif st.session_state.tab == "analysis":
     c3.metric("Time on feeder", f"{df['on_feeder'].sum() * step / fps:.1f} s")
     c4.metric("Frames", len(df))
 
-    fig = plot_trajectory(df, st.session_state.entry_frame, st.session_state.exit_frame, title=heading, bee_id=bee_id, outcome=outcome_str)
+    # Convert hive entry point from pixel to mm coordinates for the plot
+    hive_entry_mm = None
+    if st.session_state.hive_entry_point is not None and st.session_state.circle_center and st.session_state.scale_factor:
+        hx_mm, hy_mm, _ = pixel_to_mm(
+            st.session_state.hive_entry_point[0],
+            st.session_state.hive_entry_point[1],
+            st.session_state.circle_center,
+            st.session_state.scale_factor,
+        )
+        hive_entry_mm = (hx_mm, hy_mm)
+
+    fig = plot_trajectory(df, st.session_state.entry_frame, st.session_state.exit_frame, title=heading, bee_id=bee_id, outcome=outcome_str, hive_entry_mm=hive_entry_mm)
     st.pyplot(fig)
 
     # 4. Trial Outcome Question
@@ -1360,11 +1474,14 @@ elif st.session_state.tab == "analysis":
     video_export_path = os.path.join(export_dir, f"tracked_preview_{os.path.splitext(video_name)[0]}.mp4")
     if not os.path.exists(video_export_path):
         with st.spinner("Generating tracked preview video (this may take a moment)..."):
+            # Use the last tracked frame as the end boundary so the full tracking is visible
+            coords_sorted_local = sorted(st.session_state.track_coords, key=lambda c: c["frame"])
+            last_tracked_frame = int(coords_sorted_local[-1]["frame"]) if coords_sorted_local else st.session_state.exit_frame
             generate_tracked_video(
                 st.session_state.video_path,
                 st.session_state.track_coords,
                 st.session_state.entry_frame,
-                st.session_state.exit_frame,
+                last_tracked_frame,  # Use actual last tracked frame instead of exit_frame
                 video_export_path,
                 st.session_state.circle_center,
                 st.session_state.circle_radius
