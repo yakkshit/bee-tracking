@@ -40,6 +40,8 @@ import io
 import os
 import tempfile
 import time
+import re
+import shutil
 
 import cv2
 import matplotlib.pyplot as plt
@@ -52,21 +54,100 @@ from streamlit_drawable_canvas import st_canvas
 
 from tracking_logic import get_tracking_end_frame
 
+# ---------------------------------------------------------------------------
+# Page configuration & UI style rules
+# ---------------------------------------------------------------------------
 st.set_page_config(page_title="Bee Arena Tracker", page_icon="🐝", layout="wide", initial_sidebar_state="collapsed")
 
+# Premium Linear/Vercel styling
 st.markdown(
     """
 <style>
-    .block-container { padding-top: 1rem; max-width: 1200px; }
-    .player-shell {
-        background: #111; border-radius: 12px; padding: 12px;
-        box-shadow: 0 8px 32px rgba(0,0,0,0.35);
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    
+    html, body, [data-testid="stAppViewContainer"] {
+        font-family: 'Inter', system-ui, sans-serif;
+        background-color: #0B0F17;
+        color: #F3F4F6;
     }
-    .player-time { color: #eee; font-family: monospace; font-size: 14px; }
-    .tag-entry { border-left: 4px solid #2A9D8F !important; }
-    .tag-exit  { border-left: 4px solid #E63946 !important; }
-    .tag-help  { border-left: 4px solid #FFB703 !important; }
-    div[data-testid="stSidebar"] { background: #1a1a2e; }
+    
+    .app-header {
+        font-size: 32px;
+        font-weight: 700;
+        color: #FFFFFF;
+        margin-bottom: 8px;
+        letter-spacing: -0.025em;
+    }
+    .app-subheader {
+        font-size: 15px;
+        color: #9CA3AF;
+        margin-bottom: 24px;
+    }
+    
+    .premium-card {
+        background-color: #161B26;
+        border: 1px solid #232D3F;
+        border-radius: 12px;
+        padding: 24px;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    }
+    
+    .player-shell {
+        background-color: #0F131E;
+        border: 1px solid #1F293D;
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 12px;
+        box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.2);
+    }
+    .player-time {
+        color: #9CA3AF;
+        font-family: 'Inter', monospace;
+        font-size: 13px;
+        margin-top: 8px;
+    }
+    
+    div[data-baseweb="tab-list"] {
+        border-bottom: 1px solid #1F293D;
+        gap: 8px;
+    }
+    button[data-baseweb="tab"] {
+        color: #9CA3AF;
+        font-weight: 500;
+        padding: 12px 16px;
+        border-radius: 6px 6px 0 0;
+        transition: all 0.2s ease;
+    }
+    button[data-baseweb="tab"][aria-selected="true"] {
+        color: #4F46E5 !important;
+        border-bottom: 2px solid #4F46E5 !important;
+    }
+    
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    
+    .stButton>button {
+        border-radius: 8px !important;
+        font-weight: 500 !important;
+        transition: all 0.2s ease !important;
+    }
+    
+    .status-badge {
+        display: inline-block;
+        padding: 4px 10px;
+        border-radius: 9999px;
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        margin-top: 4px;
+    }
+    .status-idle { background-color: #374151; color: #D1D5DB; }
+    .status-ready { background-color: #065F46; color: #A7F3D0; }
+    .status-tracking { background-color: #1E3A8A; color: #BFDBFE; }
+    .status-lost { background-color: #7F1D1D; color: #FCA5A5; }
+    .status-complete { background-color: #14532D; color: #86EFAC; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -84,7 +165,6 @@ TRACK_SETTINGS = {
     "template_update_interval": 25,
     "feeder_radius_mm": 40.0,
 }
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -119,14 +199,15 @@ def point_to_bbox(x, y, frame_shape, size=TAG_BOX_PX):
     return clamp_bbox((x - half, y - half, size, size), frame_shape)
 
 
-def draw_calibration_overlay(img, xc, yc, r_pixels):
+def draw_calibration_overlay(img, xc, yc, r_pixels, slot_idx=0):
+    slot = st.session_state.slots[slot_idx]
     out = img.copy()
     # Outer Circle - Bright Yellow (0, 255, 255)
     cv2.circle(out, (int(xc), int(yc)), int(r_pixels), (0, 255, 255), 2)
     
     # Inner Circle - Bright Cyan (255, 255, 0)
-    xc_inner = st.session_state.get("inner_circle_center")
-    r_inner = st.session_state.get("inner_circle_radius")
+    xc_inner = slot.get("inner_circle_center")
+    r_inner = slot.get("inner_circle_radius")
     
     if xc_inner is not None and r_inner is not None:
         cv2.circle(out, (int(xc_inner[0]), int(xc_inner[1])), int(r_inner), (255, 255, 0), 2)
@@ -139,7 +220,7 @@ def draw_calibration_overlay(img, xc, yc, r_pixels):
     cv2.circle(out, (int(xc), int(yc)), 6, (0, 140, 255), -1)
     
     # Hive Entry - Bright Green
-    hive_entry = st.session_state.get("hive_entry_point")
+    hive_entry = slot.get("hive_entry_point")
     if hive_entry is not None:
         hx, hy = hive_entry
         cv2.drawMarker(out, (int(hx), int(hy)), (0, 255, 0), cv2.MARKER_STAR, 15, 2)
@@ -248,7 +329,8 @@ def extract_template(gray, bbox):
     return patch.copy() if patch.size else None
 
 
-def init_track_state(frame, bbox):
+def init_track_state(frame, bbox, slot_idx=0):
+    slot = st.session_state.slots[slot_idx]
     tracker = create_tracker()
     ib = [int(v) for v in clamp_bbox(bbox, frame.shape)]
     tracker_ok = False
@@ -258,9 +340,9 @@ def init_track_state(frame, bbox):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     cx, cy = bbox_center(ib)
     was_on_feeder = False
-    if st.session_state.circle_center and st.session_state.scale_factor:
-        _, _, d = pixel_to_mm(cx, cy, st.session_state.circle_center, st.session_state.scale_factor)
-        was_on_feeder = d <= st.session_state.feeder_radius_mm
+    if slot["circle_center"] and slot["scale_factor"]:
+        _, _, d = pixel_to_mm(cx, cy, slot["circle_center"], slot["scale_factor"])
+        was_on_feeder = d <= slot["feeder_radius_mm"]
     return {
         "bbox": tuple(float(v) for v in ib),
         "center": (cx, cy),
@@ -272,10 +354,11 @@ def init_track_state(frame, bbox):
     }
 
 
-def track_single_frame(frame, state, settings):
-    xc, yc = st.session_state.circle_center
-    r_px = st.session_state.circle_radius
-    scale = st.session_state.scale_factor
+def track_single_frame(frame, state, settings, slot_idx=0):
+    slot = st.session_state.slots[slot_idx]
+    xc, yc = slot["circle_center"]
+    r_px = slot["circle_radius"]
+    scale = slot["scale_factor"]
     feeder_mm = settings["feeder_radius_mm"]
     threshold = settings["template_threshold"]
     base_margin = settings["search_margin"]
@@ -336,6 +419,7 @@ def track_single_frame(frame, state, settings):
             if dist_px <= 300 and d_spot > feeder_mm * 0.8:
                 detected = spot
                 bw = last_bbox[2] if last_bbox else TAG_BOX_PX
+                bh = last_bbox[3] if last_bbox else TAG_BOX_PX
                 last_bbox = clamp_bbox((spot[0] - bw / 2, spot[1] - bh / 2, bw, bh), frame.shape)
                 confidence, method = 0.4, "arena_scan"
 
@@ -371,11 +455,12 @@ def track_single_frame(frame, state, settings):
     return (cx, cy), last_bbox, status, new_state
 
 
-def make_coord(frame_idx, cx, cy, fps, tag_type="auto", status="ok"):
-    xc, yc = st.session_state.circle_center
-    scale = st.session_state.scale_factor
+def make_coord(frame_idx, cx, cy, fps, slot_idx=0, tag_type="auto", status="ok"):
+    slot = st.session_state.slots[slot_idx]
+    xc, yc = slot["circle_center"]
+    scale = slot["scale_factor"]
     x_mm, y_mm, d_mm = pixel_to_mm(cx, cy, (xc, yc), scale)
-    t0 = st.session_state.entry_frame if st.session_state.entry_frame is not None else 0
+    t0 = slot["entry_frame"] if slot["entry_frame"] is not None else 0
     return {
         "frame": frame_idx,
         "time_sec": (frame_idx - t0) / fps,
@@ -389,18 +474,21 @@ def make_coord(frame_idx, cx, cy, fps, tag_type="auto", status="ok"):
     }
 
 
-def upsert_coord(coord):
-    st.session_state.track_coords = [c for c in st.session_state.track_coords if c["frame"] != coord["frame"]]
-    st.session_state.track_coords.append(coord)
-    st.session_state.track_coords.sort(key=lambda c: c["frame"])
+def upsert_coord(coord, slot_idx=0):
+    slot = st.session_state.slots[slot_idx]
+    slot["track_coords"] = [c for c in slot["track_coords"] if c["frame"] != coord["frame"]]
+    slot["track_coords"].append(coord)
+    slot["track_coords"].sort(key=lambda c: c["frame"])
 
 
-def render_player_frame(frame, coords_up_to_frame, markers, cur_center=None, status="idle"):
+def render_player_frame(frame, coords_up_to_frame, markers, slot_idx=0, cur_center=None, status="idle"):
+    slot = st.session_state.slots[slot_idx]
     vis = draw_calibration_overlay(
         frame,
-        st.session_state.circle_center[0],
-        st.session_state.circle_center[1],
-        st.session_state.circle_radius,
+        slot["circle_center"][0],
+        slot["circle_center"][1],
+        slot["circle_radius"],
+        slot_idx
     )
     if len(coords_up_to_frame) > 1:
         pts = np.array([[int(c["x_pixel"]), int(c["y_pixel"])] for c in coords_up_to_frame], np.int32).reshape((-1, 1, 2))
@@ -445,10 +533,18 @@ def build_processed_df(coords, fps, feeder_mm):
     return pd.DataFrame(records)
 
 
-def plot_trajectory(df, entry_frame=None, exit_frame=None, title="Bee Trajectory", bee_id="unknown", outcome="Unknown", hive_entry_mm=None):
+def plot_trajectory(df, entry_frame=None, exit_frame=None, title="Bee Trajectory", bee_id="unknown", outcome="Unknown", hive_entry_mm=None, orientation="unknown", p_val="unknown", u_val="unknown", dop="unknown"):
     fig, ax = plt.subplots(figsize=(8, 8), facecolor="white")
-    ax.add_patch(plt.Circle((0, 0), OUTER_RADIUS_MM, fill=False, color="#ccc", lw=2, label="Outer (42 cm)"))
-    ax.add_patch(plt.Circle((0, 0), INNER_RADIUS_MM, fill=False, color="#aaa", lw=1.5, ls="--", label="Inner (21 cm)"))
+    
+    # Outer circle boundary (dimgrey, solid)
+    ax.add_patch(plt.Circle((0, 0), OUTER_RADIUS_MM, fill=False, color="#333333", lw=2, label="Outer Boundary (r = 42 cm)"))
+    # Inner circle boundary (darkgrey, dashed)
+    ax.add_patch(plt.Circle((0, 0), INNER_RADIUS_MM, fill=False, color="#666666", lw=1.5, ls="--", label="Inner Boundary (r = 21 cm)"))
+    
+    # Text labels at the top of circles
+    ax.text(0, OUTER_RADIUS_MM + 10, "Outer Boundary (r = 42 cm)", ha="center", va="bottom", color="#333333", fontsize=9, fontweight="semibold")
+    ax.text(0, INNER_RADIUS_MM + 10, "Inner Boundary (r = 21 cm)", ha="center", va="bottom", color="#666666", fontsize=9, fontweight="semibold")
+
     x_mm, y_mm, t_sec = df["x_mm"].values, df["y_mm"].values, df["time_sec"].values
 
     # Plot Hive Entry location if available (in mm coordinates)
@@ -463,7 +559,6 @@ def plot_trajectory(df, entry_frame=None, exit_frame=None, title="Bee Trajectory
         pts = np.array([x_mm, y_mm]).T.reshape(-1, 1, 2)
         segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
         norm = plt.Normalize(t_sec.min(), t_sec.max())
-        # Use 'turbo' colormap for more vibrant, clearly visible time progression
         lc = LineCollection(segs, cmap="turbo", norm=norm, linewidth=3.0)
         lc.set_array(t_sec)
         ax.add_collection(lc)
@@ -473,9 +568,9 @@ def plot_trajectory(df, entry_frame=None, exit_frame=None, title="Bee Trajectory
         # Add time progress markers at 25%, 50%, 75% along the trajectory
         n = len(x_mm)
         for pct, marker_style, marker_color in [
-            (0.25, "o", "#FFD700"),   # Gold at 25%
-            (0.50, "s", "#FF8C00"),   # Dark Orange at 50%
-            (0.75, "D", "#FF4500"),   # Orange Red at 75%
+            (0.25, "o", "#FFD700"),
+            (0.50, "s", "#FF8C00"),
+            (0.75, "D", "#FF4500"),
         ]:
             idx = int(n * pct)
             if idx < n:
@@ -494,16 +589,28 @@ def plot_trajectory(df, entry_frame=None, exit_frame=None, title="Bee Trajectory
             ax.arrow(x_mm[-3], y_mm[-3], dx * 0.3, dy * 0.3,
                      head_width=12, head_length=8, fc="#E63946", ec="#E63946",
                      alpha=0.7, zorder=6, label="Direction")
-    ax.plot(x_mm[0], y_mm[0], "^", color="#2A9D8F", ms=10, label="Entry")
-    ax.plot(x_mm[-1], y_mm[-1], "X", color="#E63946", ms=10, label="Exit")
-    ax.plot(0, 0, "o", color="#FB8500", ms=10, label="Feeder")
+
+    # Plot entry/exit points and write circled "①" labels next to them
+    ax.plot(x_mm[0], y_mm[0], "^", color="#2ecc71", ms=10, label="Entry Point", zorder=10)
+    ax.plot(x_mm[-1], y_mm[-1], "o", color="#1a53ff", ms=10, label="Exit Point", zorder=10)
+    
+    # Circled number labels
+    ax.annotate("①", (x_mm[0], y_mm[0]), textcoords="offset points", xytext=(0, -18),
+                fontsize=9, color="#2ecc71", fontweight="bold", ha="center", va="center",
+                bbox=dict(boxstyle="circle,pad=0.1", fc="white", ec="#2ecc71", lw=1))
+    ax.annotate("①", (x_mm[-1], y_mm[-1]), textcoords="offset points", xytext=(0, 18),
+                fontsize=9, color="#1a53ff", fontweight="bold", ha="center", va="center",
+                bbox=dict(boxstyle="circle,pad=0.1", fc="white", ec="#1a53ff", lw=1))
+
+    ax.plot(0, 0, "o", color="#FB8500", ms=10, label="Feeder (0,0)")
     ax.set_xlim(-460, 460)
     ax.set_ylim(-460, 460)
     ax.set_aspect("equal")
     ax.grid(True, ls=":", alpha=0.4)
     ax.set_xlabel("X (mm)")
     ax.set_ylabel("Y (mm)")
-    ax.set_title(title, fontweight="bold")
+    
+    fig.suptitle(title, fontsize=12, fontweight="bold")
     
     # Overlay metadata text box inside the plot
     textstr = f"Bee ID: {bee_id}\nOutcome: {outcome}"
@@ -511,14 +618,11 @@ def plot_trajectory(df, entry_frame=None, exit_frame=None, title="Bee Trajectory
     ax.text(0.03, 0.03, textstr, transform=ax.transAxes, fontsize=10,
             fontweight='bold', verticalalignment='bottom', bbox=props)
             
-    ax.legend(loc="upper right", fontsize=9)
+    ax.legend(loc="upper right", fontsize=9, framealpha=1, facecolor="white", edgecolor="#cccccc")
     return fig
 
 
 def generate_tracked_video(video_path, coords, entry_frame, exit_frame, output_path, circle_center, circle_radius):
-    import cv2
-    import numpy as np
-
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return False
@@ -531,7 +635,6 @@ def generate_tracked_video(video_path, coords, entry_frame, exit_frame, output_p
 
     coords_sorted = sorted(coords, key=lambda c: c["frame"]) if coords else []
 
-    # Use tracked coordinates range as fallback so we don't accidentally truncate the preview
     if coords_sorted:
         coords_min = int(coords_sorted[0]["frame"])
         coords_max = int(coords_sorted[-1]["frame"])
@@ -541,7 +644,6 @@ def generate_tracked_video(video_path, coords, entry_frame, exit_frame, output_p
     entry_f = int(entry_frame) if entry_frame is not None else coords_min
     exit_f = int(exit_frame) if exit_frame is not None else coords_max
 
-    # Clamp to video frame count
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     entry_f = max(0, min(entry_f, total_frames - 1))
     exit_f = max(0, min(exit_f, total_frames - 1))
@@ -609,70 +711,68 @@ def video_meta(video_path):
     return meta
 
 
-def apply_point_tag(px, py, tag_mode, frame, fps):
-    """Apply entry / exit / help / analysis-end tag at pixel coords on current frame."""
+def apply_point_tag(px, py, tag_mode, frame, fps, slot_idx=0):
+    slot = st.session_state.slots[slot_idx]
     bbox = point_to_bbox(px, py, frame.shape)
     cx, cy = bbox_center(bbox)
-    cur = st.session_state.player_frame
+    cur = slot["player_frame"]
 
     if tag_mode == "entry":
-        st.session_state.entry_frame = cur
-        st.session_state.entry_point = (cx, cy)
-        st.session_state.track_coords = [c for c in st.session_state.track_coords if c["frame"] >= cur]
-        st.session_state.track_state = init_track_state(frame, bbox)
-        st.session_state.track_state["frame_idx"] = cur
-        upsert_coord(make_coord(cur, cx, cy, fps, tag_type="entry", status="manual"))
-        st.session_state.track_phase = "ready"
-        st.session_state.tracking_lost = False
+        slot["entry_frame"] = cur
+        slot["entry_point"] = (cx, cy)
+        slot["track_coords"] = [c for c in slot["track_coords"] if c["frame"] >= cur]
+        slot["track_state"] = init_track_state(frame, bbox, slot_idx)
+        slot["track_state"]["frame_idx"] = cur
+        upsert_coord(make_coord(cur, cx, cy, fps, slot_idx, tag_type="entry", status="manual"), slot_idx)
+        slot["track_phase"] = "ready"
+        slot["tracking_lost"] = False
 
     elif tag_mode == "help":
-        st.session_state.track_coords = [c for c in st.session_state.track_coords if c["frame"] < cur]
-        st.session_state.track_state = init_track_state(frame, bbox)
-        st.session_state.track_state["frame_idx"] = cur
-        upsert_coord(make_coord(cur, cx, cy, fps, tag_type="help", status="manual"))
-        st.session_state.track_phase = "tracking"
-        st.session_state.tracking_lost = False
+        slot["track_coords"] = [c for c in slot["track_coords"] if c["frame"] < cur]
+        slot["track_state"] = init_track_state(frame, bbox, slot_idx)
+        slot["track_state"]["frame_idx"] = cur
+        upsert_coord(make_coord(cur, cx, cy, fps, slot_idx, tag_type="help", status="manual"), slot_idx)
+        slot["track_phase"] = "tracking"
+        slot["tracking_lost"] = False
         st.session_state.is_playing = True
 
     elif tag_mode == "exit":
-        st.session_state.track_coords = [c for c in st.session_state.track_coords if c["frame"] < cur]
-        st.session_state.exit_frame = cur
-        st.session_state.exit_point = (cx, cy)
-        upsert_coord(make_coord(cur, cx, cy, fps, tag_type="exit", status="manual"))
-        st.session_state.track_phase = "tracking"
+        slot["track_coords"] = [c for c in slot["track_coords"] if c["frame"] < cur]
+        slot["exit_frame"] = cur
+        slot["exit_point"] = (cx, cy)
+        upsert_coord(make_coord(cur, cx, cy, fps, slot_idx, tag_type="exit", status="manual"), slot_idx)
+        slot["track_phase"] = "tracking"
         st.session_state.is_playing = True
-        st.session_state.tracking_lost = False
+        slot["tracking_lost"] = False
 
     elif tag_mode == "analysis_end":
-        st.session_state.track_coords = [c for c in st.session_state.track_coords if c["frame"] < cur]
-        st.session_state.analysis_end_frame = cur
-        st.session_state.analysis_end_point = (cx, cy)
-        upsert_coord(make_coord(cur, cx, cy, fps, tag_type="analysis_end", status="manual"))
-        st.session_state.track_phase = "complete"
-        st.session_state.is_playing = False
-        st.session_state.tracking_lost = False
+        slot["track_coords"] = [c for c in slot["track_coords"] if c["frame"] < cur]
+        slot["analysis_end_frame"] = cur
+        slot["analysis_end_point"] = (cx, cy)
+        upsert_coord(make_coord(cur, cx, cy, fps, slot_idx, tag_type="analysis_end", status="manual"), slot_idx)
+        slot["track_phase"] = "complete"
+        slot["tracking_lost"] = False
 
 
-def process_tracking_frame(frame, frame_idx, fps, settings):
-    """Track one frame; returns True if ok, False if lost."""
-    if st.session_state.track_state is None:
+def process_tracking_frame(frame, frame_idx, fps, settings, slot_idx=0):
+    slot = st.session_state.slots[slot_idx]
+    if slot["track_state"] is None:
         return False
-    state = st.session_state.track_state.copy()
+    state = slot["track_state"].copy()
     state["frame_idx"] = frame_idx
-    center, _, status, new_state = track_single_frame(frame, state, settings)
+    center, _, status, new_state = track_single_frame(frame, state, settings, slot_idx)
     if center is None or status == "lost":
-        st.session_state.tracking_lost = True
-        st.session_state.is_playing = False
-        st.session_state.track_phase = "paused_lost"
+        slot["tracking_lost"] = True
+        slot["track_phase"] = "paused_lost"
         return False
     cx, cy = center
-    upsert_coord(make_coord(frame_idx, cx, cy, fps, tag_type="auto", status=status))
-    st.session_state.track_state = new_state
+    upsert_coord(make_coord(frame_idx, cx, cy, fps, slot_idx, tag_type="auto", status=status), slot_idx)
+    slot["track_state"] = new_state
     return True
 
 
 # ---------------------------------------------------------------------------
-# Session state
+# Session state & Slot layout configuration
 # ---------------------------------------------------------------------------
 DEFAULTS = {
     "tab": "load",
@@ -715,60 +815,190 @@ DEFAULTS = {
     "bee_went_back": "unknown",
     "processed_df": None,
 }
+
+SLOT_KEYS = [
+    "video_path",
+    "video_name",
+    "selected_video_index",
+    "circle_center",
+    "circle_radius",
+    "inner_circle_center",
+    "inner_circle_radius",
+    "hive_entry_point",
+    "scale_factor",
+    "entry_frame",
+    "entry_point",
+    "exit_frame",
+    "exit_point",
+    "analysis_end_frame",
+    "analysis_end_point",
+    "track_coords",
+    "track_state",
+    "track_phase",
+    "tracking_lost",
+    "bee_went_back",
+    "processed_df",
+    "player_frame",
+    "last_player_frame",
+    "timeline_slider",
+    "frame_number_input",
+]
+
+# Initialize multi-slot state list
+if "slots" not in st.session_state:
+    st.session_state.slots = [
+        {
+            "video_path": None,
+            "video_name": "",
+            "selected_video_index": None,
+            "circle_center": None,
+            "circle_radius": None,
+            "inner_circle_center": None,
+            "inner_circle_radius": None,
+            "hive_entry_point": None,
+            "scale_factor": None,
+            "entry_frame": None,
+            "entry_point": None,
+            "exit_frame": None,
+            "exit_point": None,
+            "analysis_end_frame": None,
+            "analysis_end_point": None,
+            "track_coords": [],
+            "track_state": None,
+            "track_phase": "idle",
+            "tracking_lost": False,
+            "bee_went_back": "unknown",
+            "processed_df": None,
+            "player_frame": 0,
+            "last_player_frame": 0,
+            "timeline_slider": 0,
+            "frame_number_input": 0,
+            "feeder_radius_mm": 40.0,
+            "tracking_fps": 30.0,
+        }
+        for _ in range(4)
+    ]
+
+if "num_slots" not in st.session_state:
+    st.session_state.num_slots = 1
+
+if "active_slot" not in st.session_state:
+    st.session_state.active_slot = 0
+
+def sync_active_slot_to_flat():
+    active = st.session_state.active_slot
+    slot = st.session_state.slots[active]
+    for k in SLOT_KEYS:
+        st.session_state[k] = slot.get(k, None)
+    st.session_state.feeder_radius_mm = slot.get("feeder_radius_mm", 40.0)
+    st.session_state.tracking_fps = slot.get("tracking_fps", 30.0)
+
+def sync_flat_to_active_slot():
+    active = st.session_state.active_slot
+    slot = st.session_state.slots[active]
+    for k in SLOT_KEYS:
+        slot[k] = st.session_state.get(k, None)
+    slot["feeder_radius_mm"] = st.session_state.feeder_radius_mm
+    slot["tracking_fps"] = st.session_state.tracking_fps
+
+# Bidirectional sync on script load
+sync_active_slot_to_flat()
+
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 settings = {**TRACK_SETTINGS, "feeder_radius_mm": st.session_state.feeder_radius_mm}
 
+# ---------------------------------------------------------------------------
+# Navigation Tabs Layout
+# ---------------------------------------------------------------------------
+st.markdown('<div class="app-header">🐝 Bee Arena Tracker</div>', unsafe_allow_html=True)
+st.markdown('<div class="app-subheader">Linear-inspired concurrent animal tracking system</div>', unsafe_allow_html=True)
 
-# ---------------------------------------------------------------------------
-# Top navigation
-# ---------------------------------------------------------------------------
-st.title("🐝 Bee Arena Tracker")
-if st.session_state.video_name:
-    st.markdown(f"**Current video:** `{st.session_state.video_name}`")
-tabs = {"load": "1 · Video", "calibrate": "2 · Calibrate", "track": "3 · Track", "analysis": "4 · Analysis"}
+tabs = {
+    "load": "1 · Video Setup",
+    "calibrate": "2 · Arena Calibration",
+    "track": "3 · Tracking Room",
+    "analysis": "4 · Statistics & Analysis"
+}
 tab_keys = list(tabs.keys())
-tab_labels = [tabs[k] for k in tab_keys]
-disabled = []
-if not st.session_state.video_path:
-    disabled = ["calibrate", "track", "analysis"]
-elif not st.session_state.circle_center:
-    disabled = ["track", "analysis"]
-elif st.session_state.track_phase != "complete":
-    disabled = ["analysis"]
+
+disabled_tabs = []
+if not st.session_state.slots[0]["video_path"]:
+    disabled_tabs = ["calibrate", "track", "analysis"]
+elif not st.session_state.slots[0]["circle_center"]:
+    disabled_tabs = ["track", "analysis"]
 
 choice = st.radio(
-    "Workflow",
+    "Workflow Navigation",
     tab_keys,
     format_func=lambda k: tabs[k],
     horizontal=True,
     index=tab_keys.index(st.session_state.tab),
+    label_visibility="collapsed"
 )
-if choice in disabled:
-    st.warning(f"Complete previous steps before opening **{tabs[choice]}**.")
+
+if choice in disabled_tabs:
+    st.warning(f"Please complete previous workflow steps before unlocking **{tabs[choice]}**.")
     choice = st.session_state.tab
 st.session_state.tab = choice
 
+st.markdown("<br>", unsafe_allow_html=True)
 
 # ===================================================================
-# TAB 1 — Load video
+# TAB 1 — Load video Setup
 # ===================================================================
 if st.session_state.tab == "load":
-    st.subheader("Load your arena video")
-    st.info("Select a local video file or folder path. Videos are not uploaded to Streamlit.")
+    st.markdown('<div class="premium-card">', unsafe_allow_html=True)
+    st.markdown("### 📽 Setup Tracking Videos")
+    st.write("Specify how many videos you wish to track concurrently and select the paths or files.")
+
+    num_slots = st.selectbox(
+        "Concurrently tracked videos (maximum 4):",
+        [1, 2, 3, 4],
+        index=st.session_state.num_slots - 1,
+        help="Choose the number of video streams to process side-by-side."
+    )
+    if num_slots != st.session_state.num_slots:
+        sync_flat_to_active_slot()
+        st.session_state.num_slots = num_slots
+        if st.session_state.active_slot >= num_slots:
+            st.session_state.active_slot = 0
+        sync_active_slot_to_flat()
+        st.rerun()
+
+    if num_slots > 1:
+        slot_names = [f"Slot {i+1}: {st.session_state.slots[i]['video_name'] or 'Empty'}" for i in range(num_slots)]
+        active_sel = st.radio(
+            "Select Video Slot to Configure:",
+            range(num_slots),
+            format_func=lambda idx: slot_names[idx],
+            index=st.session_state.active_slot,
+            horizontal=True,
+            help="Select which slot you are loading a video file for."
+        )
+        if active_sel != st.session_state.active_slot:
+            sync_flat_to_active_slot()
+            st.session_state.active_slot = active_sel
+            sync_active_slot_to_flat()
+            st.rerun()
+
+    st.markdown(f"#### Loading Video for **Slot {st.session_state.active_slot + 1}**")
+    
     workspace_video = "2024-11-17 17-04-16.R13.LR.P0U8.mp4"
     if os.path.exists(workspace_video):
-        if st.checkbox(f"Use `{workspace_video}`", value=False):
+        if st.checkbox(f"Use default workspace video `{workspace_video}` (Slot {st.session_state.active_slot + 1})", value=False, key=f"use_workspace_{st.session_state.active_slot}"):
             st.session_state.video_path = workspace_video
             st.session_state.video_name = workspace_video
             st.session_state.selected_video_index = None
 
     upload_file = st.file_uploader(
-        "Or upload a single video file",
+        f"Upload a video file (.mp4, .avi, .mov) for Slot {st.session_state.active_slot + 1}",
         type=["mp4", "avi", "mov"],
         accept_multiple_files=False,
+        key=f"upload_{st.session_state.active_slot}",
+        help="Upload a video file to run tracking on."
     )
     if upload_file is not None:
         suffix = os.path.splitext(upload_file.name)[1] or ".mp4"
@@ -782,9 +1012,11 @@ if st.session_state.tab == "load":
         st.session_state.selected_video_index = None
 
     path_input = st.text_input(
-        "Local folder or video file path",
+        f"Or local path to folder/video file for Slot {st.session_state.active_slot + 1}:",
         value=st.session_state.video_folder,
-        placeholder="Enter folder path containing videos or a single video file path",
+        placeholder="Enter path to directory containing video files",
+        key=f"path_input_{st.session_state.active_slot}",
+        help="Enter the folder path or exact file location on your computer."
     )
     if path_input != st.session_state.video_folder:
         st.session_state.video_folder = path_input
@@ -793,40 +1025,36 @@ if st.session_state.tab == "load":
         st.session_state.video_path = None
         st.session_state.video_name = ""
 
-    if st.button("Refresh file list"):
+    if st.button("Refresh file list", key=f"ref_{st.session_state.active_slot}"):
         st.session_state.local_videos = []
         st.session_state.selected_video_index = None
 
     if st.session_state.video_folder:
         folder = st.session_state.video_folder
         if os.path.isdir(folder):
-            found = sorted(
-                [f for f in os.listdir(folder) if os.path.splitext(f)[1].lower() in {".mp4", ".mov", ".avi"}]
-            )
-            st.session_state.local_videos = [
-                {"name": f, "path": os.path.join(folder, f)} for f in found
-            ]
+            found = sorted([f for f in os.listdir(folder) if os.path.splitext(f)[1].lower() in {".mp4", ".mov", ".avi"}])
+            st.session_state.local_videos = [{"name": f, "path": os.path.join(folder, f)} for f in found]
         elif os.path.isfile(folder):
             st.session_state.local_videos = [{"name": os.path.basename(folder), "path": folder}]
         else:
-            st.warning("Path is not an existing folder or file. Please enter a valid local path.")
+            st.warning("Specified path is not a valid folder or file location.")
 
     if st.session_state.local_videos:
         file_options = []
         for video in st.session_state.local_videos:
             video_dir_name = os.path.splitext(video["name"])[0].replace(" ", "_")
             export_dir = os.path.join("results", video_dir_name)
-            tracked = os.path.exists(export_dir) and any(
-                f.startswith("bee_track_") and f.endswith(".csv") for f in os.listdir(export_dir)
-            )
-            label = f"{video['name']} {'✅ already tracked' if tracked else '• new'}"
+            tracked = os.path.exists(export_dir) and any(f.startswith("bee_track_") and f.endswith(".csv") for f in os.listdir(export_dir))
+            label = f"{video['name']} {'✅ tracked' if tracked else '• new'}"
             file_options.append(label)
 
         choice_index = st.selectbox(
-            "Choose a video to work with",
+            "Select Video File:",
             list(range(len(file_options))),
             format_func=lambda i: file_options[i],
             index=st.session_state.selected_video_index if st.session_state.selected_video_index is not None else 0,
+            key=f"choice_{st.session_state.active_slot}",
+            help="Choose a file from the folder to load."
         )
         st.session_state.selected_video_index = choice_index
         selected_video = st.session_state.local_videos[choice_index]
@@ -842,8 +1070,8 @@ if st.session_state.tab == "load":
         c3.metric("Duration", fmt_time(meta["frames"], meta["fps"]))
         ok, f0 = read_frame(st.session_state.video_path, 0)
         if ok:
-            st.image(cv2.cvtColor(f0, cv2.COLOR_BGR2RGB), use_container_width=True, caption="Preview")
-        # Check for existing exported results for this video and offer to load them
+            st.image(cv2.cvtColor(f0, cv2.COLOR_BGR2RGB), use_container_width=True, caption="Initial Frame Preview")
+            
         video_dir_name = os.path.splitext(st.session_state.video_name)[0].replace(" ", "_")
         export_dir = os.path.join("results", video_dir_name)
         existing_csv = None
@@ -854,59 +1082,105 @@ if st.session_state.tab == "load":
                     break
 
         if existing_csv:
-            st.info(f"Results already present for this video in {export_dir}.")
-            load_col, _ = st.columns([1, 3])
-            with load_col:
-                if st.button("Load existing results", key=f"load_results_{video_dir_name}"):
-                    try:
-                        df_existing = pd.read_csv(existing_csv)
-                        st.session_state.processed_df = df_existing
-                        # store track coords as list of records (compatible with exports)
-                        st.session_state.track_coords = df_existing.to_dict("records")
-                        # set entry/exit frames if available
-                        if "tag_type" in df_existing.columns:
-                            entries = df_existing[df_existing["tag_type"] == "entry"]["frame"]
-                            exits = df_existing[df_existing["tag_type"] == "exit"]["frame"]
-                            if not entries.empty:
-                                st.session_state.entry_frame = int(entries.iloc[0])
-                            if not exits.empty:
-                                st.session_state.exit_frame = int(exits.iloc[-1])
-                        st.session_state.track_phase = "complete"
-                        st.success("Loaded existing results into session state.")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to load existing results: {e}")
-        if st.button("Next: Calibrate arena →", type="primary"):
+            st.info(f"Existing tracking results found in {export_dir}.")
+            if st.button("Load existing results into slot", key=f"load_res_{st.session_state.active_slot}"):
+                try:
+                    df_existing = pd.read_csv(existing_csv)
+                    st.session_state.processed_df = df_existing
+                    st.session_state.track_coords = df_existing.to_dict("records")
+                    if "tag_type" in df_existing.columns:
+                        entries = df_existing[df_existing["tag_type"] == "entry"]["frame"]
+                        exits = df_existing[df_existing["tag_type"] == "exit"]["frame"]
+                        if not entries.empty:
+                            st.session_state.entry_frame = int(entries.iloc[0])
+                        if not exits.empty:
+                            st.session_state.exit_frame = int(exits.iloc[-1])
+                    st.session_state.track_phase = "complete"
+                    st.success("Loaded existing results successfully.")
+                    sync_flat_to_active_slot()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to load existing results: {e}")
+
+        if st.button("Next: Calibrate arena →", type="primary", key="load_done_btn"):
+            sync_flat_to_active_slot()
             st.session_state.tab = "calibrate"
             st.rerun()
+    else:
+        st.info("Empty State: Please select or upload a video file to begin.")
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ===================================================================
 # TAB 2 — Calibrate
 # ===================================================================
 elif st.session_state.tab == "calibrate":
-    st.subheader("Calibrate the circular arena")
-    st.caption("Click exactly 9 points: 4 on the outer rim, 4 on the inner rim, and 1 at the hive entry.")
+    st.markdown('<div class="premium-card">', unsafe_allow_html=True)
+    st.markdown("### 📐 Arena Circle Calibration")
+    st.caption("Click exactly 9 points on the canvas: 4 on the outer rim, 4 on the inner rim, and 1 at the hive entry.")
 
-    if st.button("Load demo calibration"):
+    num_slots = st.session_state.num_slots
+    if num_slots > 1:
+        slot_names = []
+        for i in range(num_slots):
+            sl = st.session_state.slots[i]
+            v_name = sl["video_name"] or "Empty"
+            cal_status = "✅ Calibrated" if sl["circle_center"] is not None else "❌ Not Calibrated"
+            slot_names.append(f"Slot {i+1} ({cal_status}): {v_name}")
+            
+        active_sel = st.radio(
+            "Select Video Slot to Calibrate:",
+            range(num_slots),
+            format_func=lambda idx: slot_names[idx],
+            index=st.session_state.active_slot,
+            horizontal=True,
+            help="Switch to select which video stream to calibrate."
+        )
+        if active_sel != st.session_state.active_slot:
+            sync_flat_to_active_slot()
+            st.session_state.active_slot = active_sel
+            sync_active_slot_to_flat()
+            st.rerun()
+
+    st.markdown(f"#### Calibrating **Slot {st.session_state.active_slot + 1}**: `{st.session_state.video_name}`")
+    
+    if not st.session_state.video_path:
+        st.warning("Please setup a video in Video Setup first.")
+        st.stop()
+
+    if st.button("Load demo calibration parameters", key=f"demo_calib_{st.session_state.active_slot}"):
         st.session_state.circle_center = (942.0, 433.0)
         st.session_state.circle_radius = 379.0
         st.session_state.scale_factor = OUTER_RADIUS_MM / 379.0
         st.session_state.inner_circle_center = (942.0, 433.0)
         st.session_state.inner_circle_radius = 189.5
         st.session_state.hive_entry_point = (1300.0, 433.0)
+        sync_flat_to_active_slot()
         st.rerun()
 
     ok, frame0 = read_frame(st.session_state.video_path, 0)
     if not ok:
-        st.error("Cannot read video.")
+        st.error("Cannot read video stream.")
         st.stop()
 
     oh, ow = frame0.shape[:2]
     ch = int(oh * CANVAS_W / ow)
     ratio = ow / CANVAS_W
-    pil = Image.fromarray(cv2.cvtColor(cv2.resize(frame0, (CANVAS_W, ch)), cv2.COLOR_BGR2RGB))
+    
+    # If already calibrated, render the overlay directly on the canvas background
+    bg_frame = frame0.copy()
+    if st.session_state.circle_center is not None and st.session_state.circle_radius is not None:
+        bg_frame = draw_calibration_overlay(
+            bg_frame,
+            st.session_state.circle_center[0],
+            st.session_state.circle_center[1],
+            st.session_state.circle_radius,
+            st.session_state.active_slot
+        )
+        
+    pil = Image.fromarray(cv2.cvtColor(cv2.resize(bg_frame, (CANVAS_W, ch)), cv2.COLOR_BGR2RGB))
 
+    # Single-slot active calibration canvas to avoid mixing coordinates
     result = st_canvas(
         fill_color="rgba(0, 255, 255, 0.4)",
         stroke_width=2,
@@ -916,7 +1190,7 @@ elif st.session_state.tab == "calibrate":
         height=ch,
         width=CANVAS_W,
         drawing_mode="point",
-        key="calib_canvas",
+        key=f"calib_canvas_slot_{st.session_state.active_slot}",
     )
 
     num_clicked = 0
@@ -947,63 +1221,172 @@ elif st.session_state.tab == "calibrate":
                 st.session_state.circle_center = (xc_o, yc_o)
                 st.session_state.circle_radius = r_o
                 st.session_state.scale_factor = OUTER_RADIUS_MM / r_o
-
                 st.session_state.inner_circle_center = (xc_i, yc_i)
                 st.session_state.inner_circle_radius = r_i
                 st.session_state.hive_entry_point = hive_entry
 
-                overlay = draw_calibration_overlay(frame0, xc_o, yc_o, r_o)
-                st.image(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB), use_container_width=True, caption="Fitted Calibration Overlay")
+                overlay = draw_calibration_overlay(frame0, xc_o, yc_o, r_o, st.session_state.active_slot)
+                st.image(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB), use_container_width=True, caption="Fitted Calibration Overlay Preview")
 
-                if st.button("Next: Start tracking →", type="primary"):
+                if st.button("Next: Start tracking room →", type="primary", key="done_calib_btn"):
+                    sync_flat_to_active_slot()
                     st.session_state.tab = "track"
-                    st.session_state.player_frame = 0
-                    st.session_state.last_player_frame = 0
-                    st.session_state.timeline_slider = 0
-                    st.session_state.frame_number_input = 0
-                    st.session_state.track_coords = []
-                    st.session_state.track_phase = "idle"
+                    for i in range(num_slots):
+                        slot = st.session_state.slots[i]
+                        slot["player_frame"] = 0
+                        slot["last_player_frame"] = 0
+                        slot["timeline_slider"] = 0
+                        slot["frame_number_input"] = 0
+                        slot["track_coords"] = []
+                        slot["track_phase"] = "idle"
+                    st.session_state.is_playing = False
+                    sync_active_slot_to_flat()
                     st.rerun()
             else:
-                st.error("Could not fit circles — please try again.")
+                st.error("Could not fit circles. Verify you clicked exactly on the rims.")
         elif len(orig) >= 4:
             st.info("Keep clicking: click 4 points for the inner circle, and then 1 point for the hive entry.")
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ===================================================================
 # TAB 3 — Track (video player)
 # ===================================================================
 elif st.session_state.tab == "track":
-    meta = video_meta(st.session_state.video_path)
-    fps = st.session_state.tracking_fps
-    max_frame = max(0, meta["frames"] - 1)
-    cur = int(st.session_state.player_frame)
-    cur = max(0, min(cur, max_frame))
-    last_val = st.session_state.get("last_player_frame", 0)
+    num_slots = st.session_state.num_slots
 
-    # Detect user interaction on slider or number input vs programmatic changes
-    if "timeline_slider" in st.session_state and st.session_state.timeline_slider != last_val:
-        cur = int(st.session_state.timeline_slider)
-        cur = max(0, min(cur, max_frame))
-        st.session_state.is_playing = False
-    elif "frame_number_input" in st.session_state and st.session_state.frame_number_input != last_val:
-        cur = int(st.session_state.frame_number_input)
-        cur = max(0, min(cur, max_frame))
+    # --- Callbacks for Slider / Input changes (User Interacted) ---
+    def on_timeline_change(slot_idx):
+        slide_key = f"timeline_slider_widget_{slot_idx}"
+        new_val = st.session_state[slide_key]
+        st.session_state.slots[slot_idx]["player_frame"] = new_val
+        st.session_state.slots[slot_idx]["last_player_frame"] = new_val
         st.session_state.is_playing = False
 
-    st.session_state.player_frame = cur
-    st.session_state.timeline_slider = cur
-    st.session_state.frame_number_input = cur
-    st.session_state.last_player_frame = cur
+    def on_num_change(slot_idx):
+        num_key = f"frame_num_widget_{slot_idx}"
+        new_val = st.session_state[num_key]
+        st.session_state.slots[slot_idx]["player_frame"] = new_val
+        st.session_state.slots[slot_idx]["last_player_frame"] = new_val
+        st.session_state.is_playing = False
 
-    ok, frame = read_frame(st.session_state.video_path, cur)
-    if not ok:
-        st.error("Cannot read frame.")
-        st.stop()
+    if num_slots > 1:
+        slot_names = []
+        for idx in range(num_slots):
+            sl = st.session_state.slots[idx]
+            v_name = sl["video_name"] or f"Slot {idx+1}"
+            phase_str = sl["track_phase"].upper()
+            if sl["tracking_lost"]:
+                phase_str = "LOST"
+            slot_names.append(f"Slot {idx+1} ({phase_str}): {v_name}")
+            
+        active_sel = st.radio(
+            "Select active video to apply manual tags to:",
+            range(num_slots),
+            format_func=lambda idx: slot_names[idx],
+            index=st.session_state.active_slot,
+            horizontal=True,
+            help="Choose which video you want to interact with on the manual tag buttons."
+        )
+        if active_sel != st.session_state.active_slot:
+            sync_flat_to_active_slot()
+            st.session_state.active_slot = active_sel
+            sync_active_slot_to_flat()
+            st.rerun()
 
-    stride = int(st.session_state.get("track_stride", 1))
+    # --- Status banners at the top of columns ---
+    cols_status = st.columns(num_slots)
+    for i in range(num_slots):
+        slot = st.session_state.slots[i]
+        with cols_status[i]:
+            phase = slot["track_phase"]
+            vname = slot["video_name"] or f"Slot {i+1}"
+            if phase == "idle":
+                st.markdown(f'<div class="status-badge status-idle">Slot {i+1}: Tag Entry Point</div>', unsafe_allow_html=True)
+            elif phase == "ready":
+                st.markdown(f'<div class="status-badge status-ready">Slot {i+1}: Ready</div>', unsafe_allow_html=True)
+            elif phase == "tracking":
+                st.markdown(f'<div class="status-badge status-tracking">Slot {i+1}: Tracking</div>', unsafe_allow_html=True)
+            elif phase == "paused_lost":
+                st.markdown(f'<div class="status-badge status-lost">Slot {i+1}: Lost</div>', unsafe_allow_html=True)
+            elif phase == "complete":
+                st.markdown(f'<div class="status-badge status-complete">Slot {i+1}: Complete</div>', unsafe_allow_html=True)
 
-    # Inject keyboard shortcut Shift+D
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # --- Tag tool buttons ---
+    t1, t2, t3, t4, t5, t6 = st.columns(6)
+    with t1:
+        if st.button("🟢 Entry tag", use_container_width=True, type="primary" if st.session_state.tag_mode == "entry" else "secondary", help="Click on the bee where it enters the arena."):
+            st.session_state.tag_mode = "entry" if st.session_state.tag_mode != "entry" else None
+            st.session_state.is_playing = False
+            st.rerun()
+    with t2:
+        if st.button("🟡 Help tag", use_container_width=True, type="primary" if st.session_state.tag_mode == "help" else "secondary", help="Use if the tracker loses tracking; click the bee to re-acquire."):
+            st.session_state.tag_mode = "help" if st.session_state.tag_mode != "help" else None
+            st.session_state.is_playing = False
+            st.rerun()
+    with t3:
+        if st.button("🔴 Exit tag", use_container_width=True, type="primary" if st.session_state.tag_mode == "exit" else "secondary", help="Mark where the bee exits the arena."):
+            st.session_state.tag_mode = "exit" if st.session_state.tag_mode != "exit" else None
+            st.session_state.is_playing = False
+            st.rerun()
+    with t4:
+        if st.button("⏹ End tag", use_container_width=True, type="primary" if st.session_state.tag_mode == "analysis_end" else "secondary", help="Manually terminate tracking boundary."):
+            st.session_state.tag_mode = "analysis_end" if st.session_state.tag_mode != "analysis_end" else None
+            st.session_state.is_playing = False
+            st.rerun()
+    with t5:
+        if st.button("↺ Reset Active Slot", use_container_width=True, help="Reset the tracking state of the currently active video slot."):
+            for k in ("entry_frame", "entry_point", "exit_frame", "exit_point", "analysis_end_frame", "analysis_end_point", "track_state"):
+                st.session_state[k] = None
+            st.session_state.track_coords = []
+            st.session_state.track_phase = "idle"
+            st.session_state.is_playing = False
+            st.session_state.player_frame = 0
+            st.session_state.timeline_slider = 0
+            st.session_state.frame_number_input = 0
+            st.session_state.tag_mode = None
+            st.session_state.tracking_lost = False
+            sync_flat_to_active_slot()
+            st.rerun()
+    with t6:
+        if st.button("↺ Reset All Slots", use_container_width=True, help="Reset tracking states of all loaded slots."):
+            for idx in range(num_slots):
+                sl = st.session_state.slots[idx]
+                for k in ("entry_frame", "entry_point", "exit_frame", "exit_point", "analysis_end_frame", "analysis_end_point", "track_state"):
+                    sl[k] = None
+                sl["track_coords"] = []
+                sl["track_phase"] = "idle"
+                sl["player_frame"] = 0
+                sl["timeline_slider"] = 0
+                sl["frame_number_input"] = 0
+                sl["tracking_lost"] = False
+            st.session_state.is_playing = False
+            st.session_state.tag_mode = None
+            sync_active_slot_to_flat()
+            st.rerun()
+
+    with st.expander("⚙️ Tracking Config", expanded=False):
+        st.session_state.track_stride = st.slider(
+            "Frame Stride",
+            min_value=1,
+            max_value=60,
+            value=st.session_state.track_stride,
+            step=1,
+            help="1x tracks every frame, 2x tracks every other frame, increasing playback speed."
+        )
+
+    if st.session_state.tag_mode:
+        mode_labels = {
+            "entry": "Entry — click the bee on the active canvas",
+            "help": "Help — click the bee to re-acquire",
+            "exit": "Exit — click the exit location",
+            "analysis_end": "End — click the end frame location",
+        }
+        st.info(f"**Tool Active:** {mode_labels[st.session_state.tag_mode]} on **Slot {st.session_state.active_slot+1}**")
+
+    # --- Inject keyboard shortcut Shift+D ---
     st.components.v1.html(
         """
         <script>
@@ -1027,237 +1410,262 @@ elif st.session_state.tab == "track":
         width=0,
     )
 
-    # --- Tracker state synchronization ---
-    coord_at_cur = next((c for c in st.session_state.track_coords if c["frame"] == cur), None)
-    if coord_at_cur:
-        st.session_state.tracking_lost = False
-        if st.session_state.track_phase == "paused_lost":
-            st.session_state.track_phase = "ready"
-        if st.session_state.track_state is None or st.session_state.track_state.get("frame_idx") != cur:
-            bbox = point_to_bbox(coord_at_cur["x_pixel"], coord_at_cur["y_pixel"], frame.shape)
-            st.session_state.track_state = init_track_state(frame, bbox)
-            st.session_state.track_state["frame_idx"] = cur
+    stride = int(st.session_state.get("track_stride", 1))
+
+    # --- Render Grid Layout of Players ---
+    import math
+    num_rows = math.ceil(num_slots / 2)
+    grid_cols = []
+    if num_slots == 1:
+        grid_cols = [st.container()]
     else:
-        if st.session_state.entry_frame is not None:
-            if cur < st.session_state.entry_frame:
-                st.session_state.track_phase = "idle"
-                st.session_state.tracking_lost = False
-            elif cur > st.session_state.entry_frame:
-                st.session_state.tracking_lost = True
-                st.session_state.track_phase = "paused_lost"
+        for r in range(num_rows):
+            grid_cols.extend(st.columns(2))
 
-    # --- Status banner ---
-    phase = st.session_state.track_phase
-    if phase == "idle":
-        st.info("**Step 1:** Scrub to where the bee enters. Select **Entry tag** and click on the bee.")
-    elif phase == "ready":
-        st.info("**Step 2:** Press **Play** to run live tracking. Use **Help tag** if tracking is lost. Use **Exit tag** when the bee leaves.")
-    elif phase == "tracking":
-        st.success("Live tracking… Press **Pause** anytime. Place **Exit tag** when done.")
-    elif phase == "paused_lost":
-        st.warning("Tracking lost — select **Help tag**, click the bee, tracking resumes automatically.")
-    elif phase == "complete":
-        st.success("Tracking complete! Go to **4 · Analysis**.")
+    for i in range(num_slots):
+        slot = st.session_state.slots[i]
+        if not slot["video_path"]:
+            with grid_cols[i]:
+                st.warning(f"Slot {i+1}: No video loaded.")
+            continue
 
-    # --- Tag tool buttons ---
-    t1, t2, t3, t4, t5 = st.columns(5)
-    with t1:
-        if st.button("🟢 Entry tag", use_container_width=True, type="primary" if st.session_state.tag_mode == "entry" else "secondary"):
-            st.session_state.tag_mode = "entry" if st.session_state.tag_mode != "entry" else None
-            st.session_state.is_playing = False
-            st.rerun()
-    with t2:
-        if st.button("🟡 Help tag", use_container_width=True, type="primary" if st.session_state.tag_mode == "help" else "secondary"):
-            st.session_state.tag_mode = "help" if st.session_state.tag_mode != "help" else None
-            st.session_state.is_playing = False
-            st.rerun()
-    with t3:
-        if st.button("🔴 Exit tag", use_container_width=True, type="primary" if st.session_state.tag_mode == "exit" else "secondary"):
-            st.session_state.tag_mode = "exit" if st.session_state.tag_mode != "exit" else None
-            st.session_state.is_playing = False
-            st.rerun()
-    with t4:
-        if st.button("⏹ End tag", use_container_width=True, type="primary" if st.session_state.tag_mode == "analysis_end" else "secondary"):
-            st.session_state.tag_mode = "analysis_end" if st.session_state.tag_mode != "analysis_end" else None
-            st.session_state.is_playing = False
-            st.rerun()
-    with t5:
-        if st.button("↺ Reset session", use_container_width=True):
-            for k in ("entry_frame", "entry_point", "exit_frame", "exit_point", "analysis_end_frame", "analysis_end_point", "track_state"):
-                st.session_state[k] = None
-            st.session_state.track_coords = []
-            st.session_state.track_phase = "idle"
-            st.session_state.is_playing = False
-            st.session_state.player_frame = 0
-            st.session_state.timeline_slider = 0
-            st.session_state.tag_mode = None
-            st.session_state.tracking_lost = False
-            st.rerun()
+        slot_meta = video_meta(slot["video_path"])
+        slot_fps = slot.get("tracking_fps") or slot_meta["fps"] or 30.0
+        slot_max = max(0, slot_meta["frames"] - 1)
 
-    with st.expander("⚙️ Tracking Options", expanded=False):
-        st.session_state.track_stride = st.slider(
-            "Tracking Speed / Frame Stride",
-            min_value=1,
-            max_value=60,
-            value=st.session_state.track_stride,
-            step=1,
-            help="1x tracks every frame, 2x tracks alternate frames, up to 60x."
-        )
+        slot_cur = int(slot["player_frame"])
+        slot_cur = max(0, min(slot_cur, slot_max))
+        slot["last_player_frame"] = slot_cur
 
-    if st.session_state.tag_mode:
-        mode_labels = {
-            "entry": "Entry — click the bee where tracking should start",
-            "help": "Help — click the bee to re-acquire tracking",
-            "exit": "Exit — click the bee (or its last position) to mark an exit event",
-            "analysis_end": "End — click the frame where analysis should finish",
-        }
-        st.caption(f"**Active tool:** {mode_labels[st.session_state.tag_mode]}")
+        # Force state update of the widgets before they are drawn
+        st.session_state[f"timeline_slider_widget_{i}"] = slot_cur
+        st.session_state[f"frame_num_widget_{i}"] = slot_cur
 
-    # --- Build display frame ---
-    coords_sorted = sorted(st.session_state.track_coords, key=lambda c: c["frame"])
-    coords_visible = [c for c in coords_sorted if c["frame"] <= cur]
-    coord_at_cur = next((c for c in coords_sorted if c["frame"] == cur), None)
+        ok_f, frame = read_frame(slot["video_path"], slot_cur)
+        if not ok_f:
+            with grid_cols[i]:
+                st.error(f"Cannot read frame {slot_cur} for Slot {i+1}")
+            continue
 
-    markers = []
-    if st.session_state.entry_point:
-        markers.append((*st.session_state.entry_point, (42, 157, 143), "ENTRY"))
-    if st.session_state.exit_point:
-        markers.append((*st.session_state.exit_point, (230, 57, 70), "EXIT"))
-    if st.session_state.analysis_end_point:
-        markers.append((*st.session_state.analysis_end_point, (255, 183, 77), "END"))
+        slot_coords = slot["track_coords"]
+        coord_at_cur = next((c for c in slot_coords if c["frame"] == slot_cur), None)
+        if coord_at_cur:
+            slot["tracking_lost"] = False
+            if slot["track_phase"] == "paused_lost":
+                slot["track_phase"] = "ready"
+            if slot["track_state"] is None or slot["track_state"].get("frame_idx") != slot_cur:
+                bbox = point_to_bbox(coord_at_cur["x_pixel"], coord_at_cur["y_pixel"], frame.shape)
+                slot["track_state"] = init_track_state(frame, bbox, i)
+                slot["track_state"]["frame_idx"] = slot_cur
+        else:
+            if slot["entry_frame"] is not None:
+                if slot_cur < slot["entry_frame"]:
+                    slot["track_phase"] = "idle"
+                    slot["tracking_lost"] = False
+                elif slot_cur > slot["entry_frame"]:
+                    slot["tracking_lost"] = True
+                    slot["track_phase"] = "paused_lost"
 
-    cur_center = (coord_at_cur["x_pixel"], coord_at_cur["y_pixel"]) if coord_at_cur else None
-    cur_status = coord_at_cur.get("status", "ok") if coord_at_cur else "idle"
-    vis = render_player_frame(frame, coords_visible, markers, cur_center, cur_status)
+        coords_sorted = sorted(slot["track_coords"], key=lambda c: c["frame"])
+        coords_visible = [c for c in coords_sorted if c["frame"] <= slot_cur]
 
-    oh, ow = vis.shape[:2]
-    ch = int(oh * CANVAS_W / ow)
-    ratio = ow / CANVAS_W
-    vis_rgb = cv2.cvtColor(cv2.resize(vis, (CANVAS_W, ch)), cv2.COLOR_BGR2RGB)
+        markers = []
+        if slot["entry_point"]:
+            markers.append((*slot["entry_point"], (42, 157, 143), "ENTRY"))
+        if slot["exit_point"]:
+            markers.append((*slot["exit_point"], (230, 57, 70), "EXIT"))
+        if slot["analysis_end_point"]:
+            markers.append((*slot["analysis_end_point"], (255, 183, 77), "END"))
 
-    st.markdown('<div class="player-shell">', unsafe_allow_html=True)
+        cur_center = (coord_at_cur["x_pixel"], coord_at_cur["y_pixel"]) if coord_at_cur else None
+        cur_status = coord_at_cur.get("status", "ok") if coord_at_cur else "idle"
+        vis = render_player_frame(frame, coords_visible, markers, i, cur_center, cur_status)
 
-    if st.session_state.tag_mode:
-        canvas = st_canvas(
-            fill_color="rgba(255,255,255,0)",
-            stroke_width=0,
-            background_image=Image.fromarray(vis_rgb),
-            update_streamlit=True,
-            height=ch,
-            width=CANVAS_W,
-            drawing_mode="point",
-            point_display_radius=8,
-            key=f"tag_{st.session_state.tag_mode}_{cur}",
-        )
-        if canvas.json_data:
-            for obj in canvas.json_data.get("objects", []):
-                if obj.get("type") == "circle":
-                    r = obj.get("radius", 0)
-                    cx_c = (obj["left"] + r) * ratio
-                    cy_c = (obj["top"] + r) * ratio
-                    apply_point_tag(cx_c, cy_c, st.session_state.tag_mode, frame, fps)
-                    st.session_state.tag_mode = None
-                    if st.session_state.track_phase == "complete":
-                        st.session_state.tab = "analysis"
-                    st.rerun()
-    else:
-        st.image(vis_rgb, use_container_width=True)
+        oh, ow = vis.shape[:2]
+        canvas_width = 440 if num_slots > 1 else CANVAS_W
+        ch = int(oh * canvas_width / ow)
+        ratio = ow / canvas_width
+        vis_rgb = cv2.cvtColor(cv2.resize(vis, (canvas_width, ch)), cv2.COLOR_BGR2RGB)
 
-    # --- Player controls ---
-    p1, p2, p3, p4, p5, p6 = st.columns([1, 1, 1, 1, 4, 2])
+        with grid_cols[i]:
+            title_suffix = " ⭐️ (ACTIVE)" if i == st.session_state.active_slot else ""
+            st.markdown(f"##### Video Slot {i+1}: `{slot['video_name']}`{title_suffix}")
+            st.markdown('<div class="player-shell">', unsafe_allow_html=True)
+
+            if st.session_state.tag_mode and i == st.session_state.active_slot:
+                canvas = st_canvas(
+                    fill_color="rgba(255,255,255,0)",
+                    stroke_width=0,
+                    background_image=Image.fromarray(vis_rgb),
+                    update_streamlit=True,
+                    height=ch,
+                    width=canvas_width,
+                    drawing_mode="point",
+                    point_display_radius=8,
+                    key=f"tag_{st.session_state.tag_mode}_slot_{i}_{slot_cur}",
+                )
+                if canvas.json_data:
+                    for obj in canvas.json_data.get("objects", []):
+                        if obj.get("type") == "circle":
+                            r = obj.get("radius", 0)
+                            cx_c = (obj["left"] + r) * ratio
+                            cy_c = (obj["top"] + r) * ratio
+                            apply_point_tag(cx_c, cy_c, st.session_state.tag_mode, frame, slot_fps, i)
+                            st.session_state.tag_mode = None
+                            if slot["track_phase"] == "complete" and num_slots == 1:
+                                st.session_state.tab = "analysis"
+                            sync_active_slot_to_flat()
+                            st.rerun()
+            else:
+                st.image(vis_rgb, use_container_width=True)
+
+            pc1, pc2, pc3 = st.columns([5, 2, 2])
+            with pc1:
+                st.slider(
+                    f"Timeline Slot {i+1}",
+                    0,
+                    slot_max,
+                    value=slot["player_frame"],
+                    label_visibility="collapsed",
+                    key=f"timeline_slider_widget_{i}",
+                    on_change=on_timeline_change,
+                    args=(i,)
+                )
+            with pc2:
+                st.number_input(
+                    f"Frame Slot {i+1}",
+                    min_value=0,
+                    max_value=slot_max,
+                    value=slot["player_frame"],
+                    step=1,
+                    label_visibility="collapsed",
+                    key=f"frame_num_widget_{i}",
+                    on_change=on_num_change,
+                    args=(i,)
+                )
+            with pc3:
+                if i != st.session_state.active_slot:
+                    if st.button("Activate", key=f"activate_slot_btn_{i}", use_container_width=True, help="Activate this slot for tagging"):
+                        sync_flat_to_active_slot()
+                        st.session_state.active_slot = i
+                        sync_active_slot_to_flat()
+                        st.rerun()
+                else:
+                    st.markdown("<div style='text-align: center; color: #2A9D8F; font-weight: bold; margin-top: 4px;'>Active</div>", unsafe_allow_html=True)
+
+            slot_end_f = get_tracking_end_frame(
+                exit_frame=slot["exit_frame"],
+                max_frame=slot_max,
+                analysis_end_frame=slot["analysis_end_frame"],
+            )
+            st.markdown(
+                f'<p class="player-time">{fmt_time(slot_cur, slot_fps)} / {fmt_time(slot_end_f, slot_fps)} &nbsp;·&nbsp; Frame {slot_cur} &nbsp;·&nbsp; {len(slot_coords)} pts</p>',
+                unsafe_allow_html=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    # --- Global Controls Below Players ---
+    st.markdown("---")
+    p1, p2, p3, p4, p5 = st.columns([1, 1, 1, 1, 4])
+    
+    active_slot = st.session_state.active_slot
+    active_s = st.session_state.slots[active_slot]
+    active_cur = active_s["player_frame"]
+    active_meta = video_meta(active_s["video_path"]) if active_s["video_path"] else {"fps": 30.0, "frames": 1}
+    active_fps = active_s.get("tracking_fps") or active_meta["fps"] or 30.0
+    active_max = max(0, active_meta["frames"] - 1)
+    
     with p1:
-        if st.button("⏮", help="Back 5s"):
-            st.session_state.player_frame = max(0, cur - int(fps * 5))
+        if st.button("⏮", help="Back 5s (Active Slot)"):
+            active_s["player_frame"] = max(0, active_cur - int(active_fps * 5))
             st.session_state.is_playing = False
+            sync_active_slot_to_flat()
             st.rerun()
     with p2:
-        if st.button("◀"):
-            st.session_state.player_frame = max(0, cur - stride)
+        if st.button("◀", help="Back 1 Stride (Active Slot)"):
+            active_s["player_frame"] = max(0, active_cur - stride)
             st.session_state.is_playing = False
+            sync_active_slot_to_flat()
             st.rerun()
     with p3:
         play_label = "⏸" if st.session_state.is_playing else "▶"
-        if st.button(play_label, help="Play / Pause"):
-            if st.session_state.entry_frame is None:
-                st.warning("Set an Entry tag first.")
-            elif st.session_state.track_phase in ("ready", "tracking", "paused_lost"):
-                if st.session_state.track_phase == "paused_lost" and st.session_state.tracking_lost:
-                    st.warning("Use Help tag to re-acquire the bee first.")
-                else:
-                    st.session_state.is_playing = not st.session_state.is_playing
-                    if st.session_state.is_playing:
-                        st.session_state.track_phase = "tracking"
-                        # Discard coordinates beyond the current frame
-                        st.session_state.track_coords = [c for c in st.session_state.track_coords if c["frame"] <= cur]
-                    st.rerun()
-            elif st.session_state.track_phase == "complete":
-                st.info("Tracking finished — open Analysis tab.")
+        if st.button(play_label, help="Play / Pause All"):
+            any_ready = False
+            for idx in range(num_slots):
+                sl = st.session_state.slots[idx]
+                if sl["video_path"] and sl["entry_frame"] is not None:
+                    any_ready = True
+            if not any_ready:
+                st.warning("Set an Entry tag on at least one video first.")
+            else:
+                st.session_state.is_playing = not st.session_state.is_playing
+                if st.session_state.is_playing:
+                    for idx in range(num_slots):
+                        sl = st.session_state.slots[idx]
+                        if sl["track_phase"] in ("ready", "tracking", "paused_lost") and not sl["tracking_lost"]:
+                            sl["track_phase"] = "tracking"
+                            sl["track_coords"] = [c for c in sl["track_coords"] if c["frame"] <= sl["player_frame"]]
+                sync_active_slot_to_flat()
+                st.rerun()
     with p4:
-        if st.button("▶▶"):
-            st.session_state.player_frame = min(max_frame, cur + stride)
+        if st.button("▶▶", help="Forward 1 Stride (Active Slot)"):
+            active_s["player_frame"] = min(active_max, active_cur + stride)
             st.session_state.is_playing = False
+            sync_active_slot_to_flat()
             st.rerun()
     with p5:
-        st.slider(
-            "Timeline",
-            0,
-            max_frame,
-            value=st.session_state.timeline_slider,
-            label_visibility="collapsed",
-            key="timeline_slider",
-        )
-    with p6:
-        st.number_input(
-            "Frame",
-            min_value=0,
-            max_value=max_frame,
-            value=st.session_state.frame_number_input,
-            step=1,
-            label_visibility="collapsed",
-            key="frame_number_input",
-        )
+        st.markdown(f"**Playback Controls (Stepping targets Slot {active_slot+1})** | Speed: {stride} frames")
 
-    end_f = get_tracking_end_frame(
-        exit_frame=st.session_state.exit_frame,
-        max_frame=max_frame,
-        analysis_end_frame=st.session_state.analysis_end_frame,
-    )
-    st.markdown(
-        f'<p class="player-time">{fmt_time(cur, fps)} / {fmt_time(end_f, fps)} &nbsp;·&nbsp; Frame {cur} &nbsp;·&nbsp; {len(coords_sorted)} tracked points</p>',
-        unsafe_allow_html=True,
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
+    # --- Live tracking engine (synchronized concurrent frame loops) ---
+    if st.session_state.is_playing:
+        any_advanced = False
+        for idx in range(num_slots):
+            slot = st.session_state.slots[idx]
+            if not slot["video_path"] or slot["track_state"] is None:
+                continue
+            if slot["track_phase"] != "tracking" or slot["tracking_lost"]:
+                continue
 
-    # --- Live tracking engine (one frame per rerun while playing) ---
-    if st.session_state.is_playing and st.session_state.track_phase == "tracking":
-        entry_f = st.session_state.entry_frame or 0
-        end_f = get_tracking_end_frame(
-            exit_frame=st.session_state.exit_frame,
-            max_frame=max_frame,
-            analysis_end_frame=st.session_state.analysis_end_frame,
-        )
+            slot_meta = video_meta(slot["video_path"])
+            slot_max = max(0, slot_meta["frames"] - 1)
+            slot_cur = int(slot["player_frame"])
 
-        if cur >= end_f:
-            st.session_state.is_playing = False
-            st.session_state.track_phase = "complete"
-            st.rerun()
+            end_f = get_tracking_end_frame(
+                exit_frame=slot["exit_frame"],
+                max_frame=slot_max,
+                analysis_end_frame=slot["analysis_end_frame"],
+            )
 
-        next_f = cur + stride
-        if next_f > end_f:
-            st.session_state.is_playing = False
-            st.session_state.track_phase = "complete"
-            st.rerun()
+            if slot_cur >= end_f:
+                slot["track_phase"] = "complete"
+                continue
 
-        ok_n, frame_n = read_frame(st.session_state.video_path, next_f)
-        if ok_n and st.session_state.track_state is not None:
-            if not process_tracking_frame(frame_n, next_f, fps, settings):
-                st.session_state.player_frame = next_f
-                st.rerun()
-            st.session_state.player_frame = next_f
+            next_f = slot_cur + stride
+            if next_f > end_f:
+                slot["track_phase"] = "complete"
+                continue
+
+            ok_n, frame_n = read_frame(slot["video_path"], next_f)
+            if ok_n:
+                slot_fps = slot.get("tracking_fps") or slot_meta["fps"] or 30.0
+                if process_tracking_frame(frame_n, next_f, slot_fps, settings, idx):
+                    slot["player_frame"] = next_f
+                    slot["last_player_frame"] = next_f
+                    any_advanced = True
+                else:
+                    slot["player_frame"] = next_f
+                    slot["last_player_frame"] = next_f
+                    any_advanced = True
+            else:
+                slot["track_phase"] = "complete"
+
+        if any_advanced:
             time.sleep(0.015)
+            sync_active_slot_to_flat()
             st.rerun()
         else:
             st.session_state.is_playing = False
+            sync_active_slot_to_flat()
             st.rerun()
 
 
@@ -1267,12 +1675,65 @@ elif st.session_state.tab == "track":
 elif st.session_state.tab == "analysis":
     st.subheader("Trajectory analysis")
 
-    if st.session_state.track_phase != "complete" or not st.session_state.track_coords:
-        st.warning("Finish tracking first (place an End tag on the Track tab, or let the video reach its end).")
+    num_slots = st.session_state.num_slots
+    
+    # 1. Verification that tracking is complete
+    uncomplete = [i for i in range(num_slots) if st.session_state.slots[i]["track_phase"] != "complete" or not st.session_state.slots[i]["track_coords"]]
+    if uncomplete:
+        st.warning(f"Complete tracking for all active slots first. Unfinished slots: {', '.join([f'Slot {i+1}' for i in uncomplete])}")
         if st.button("← Back to tracking"):
             st.session_state.tab = "track"
             st.rerun()
         st.stop()
+
+    # 2. If multiple slots, show comparative metrics at the top
+    if num_slots > 1:
+        st.markdown("### 📊 Metrics Comparison")
+        comp_records = []
+        for i in range(num_slots):
+            slot = st.session_state.slots[i]
+            video_name = slot["video_name"]
+            import re
+            bee_id = "unknown"
+            match_id = re.search(r'\b(R[_\s]*\d+)\b', video_name, re.IGNORECASE)
+            if match_id:
+                bee_id = match_id.group(1).upper().replace("_", "").replace(" ", "")
+            
+            df_temp = build_processed_df(slot["track_coords"], slot.get("tracking_fps") or 30.0, slot.get("feeder_radius_mm") or 40.0)
+            step = df_temp["frame"].diff().dropna().median() if len(df_temp) > 1 else 1
+            pts = df_temp[["x_mm", "y_mm"]].values
+            path_len = float(np.sum(np.sqrt(np.sum(np.diff(pts, axis=0) ** 2, axis=1)))) if len(pts) > 1 else 0
+            
+            outcome_str = "Unknown"
+            if slot["bee_went_back"] is True:
+                outcome_str = "Went back"
+            elif slot["bee_went_back"] is False:
+                outcome_str = "Still in arena"
+                
+            comp_records.append({
+                "Slot": f"Slot {i+1}",
+                "Video Name": video_name,
+                "Bee ID": bee_id,
+                "Outcome": outcome_str,
+                "Duration (s)": round(len(df_temp) * step / (slot.get("tracking_fps") or 30.0), 1),
+                "Path Length (cm)": round(path_len / 10.0, 1),
+                "Time on Feeder (s)": round(df_temp['on_feeder'].sum() * step / (slot.get("tracking_fps") or 30.0), 1),
+            })
+        st.dataframe(pd.DataFrame(comp_records), use_container_width=True, hide_index=True)
+        st.markdown("---")
+        
+        # Select active slot to display detailed breakdown
+        active_sel = st.selectbox(
+            "Select Video Slot for Detailed Analysis & Export:",
+            range(num_slots),
+            format_func=lambda idx: f"Video Slot {idx+1} : {st.session_state.slots[idx]['video_name']}",
+            index=st.session_state.active_slot
+        )
+        if active_sel != st.session_state.active_slot:
+            sync_flat_to_active_slot()
+            st.session_state.active_slot = active_sel
+            sync_active_slot_to_flat()
+            st.rerun()
 
     import re
     import shutil
@@ -1281,21 +1742,21 @@ elif st.session_state.tab == "analysis":
     video_name = st.session_state.video_name
     bee_id = "unknown"
     orientation = "unknown"
-    p_val = None
-    u_val = None
+    p_val = "unknown"
+    u_val = "unknown"
 
-    # Parse ID (e.g. R13)
-    match_id = re.search(r'\b(R\d+)\b', video_name, re.IGNORECASE)
+    # Robust parser for R13 / R_13 / R 13
+    match_id = re.search(r'\b(R[_\s]*\d+)\b', video_name, re.IGNORECASE)
     if match_id:
-        bee_id = match_id.group(1).upper()
+        bee_id = match_id.group(1).upper().replace("_", "").replace(" ", "")
 
     # Parse Orientation (LR or TB)
     match_ori = re.search(r'\b(LR|TB)\b', video_name, re.IGNORECASE)
     if match_ori:
         orientation = match_ori.group(1).upper()
 
-    # Parse Stimulus P...U...
-    match_pu = re.search(r'\bP(\d+(?:\.\d+)?)U(\d+(?:\.\d+)?)\b', video_name, re.IGNORECASE)
+    # Robust parser for P_X.X_U_Y.Y or P0.1U8 or P4.3U8.0
+    match_pu = re.search(r'\bP[_\s]*(\d+(?:\.\d+)?)[_\s]*U[_\s]*(\d+(?:\.\d+)?)\b', video_name, re.IGNORECASE)
     if match_pu:
         p_val = match_pu.group(1)
         u_val = match_pu.group(2)
@@ -1307,6 +1768,8 @@ elif st.session_state.tab == "analysis":
     xdop = "unknown"
     x_val = "unknown"
     edge_intensity = "unknown"
+    signal_rank = "unknown"
+    calibration_date = "unknown"
     
     csv_path = None
     results_dir = "calibrations"
@@ -1316,81 +1779,74 @@ elif st.session_state.tab == "analysis":
                 csv_path = os.path.join(results_dir, f)
                 break
 
-    if csv_path and p_val and u_val and orientation != "unknown":
+    if csv_path and p_val != "unknown" and u_val != "unknown" and orientation != "unknown":
         try:
             calib_df = pd.read_csv(csv_path)
-            target_stim = f"p{float(p_val):.1f}u{float(u_val):.1f}"
+            target_p = float(p_val)
+            target_u = float(u_val)
+            
             for idx, row in calib_df.iterrows():
-                row_stim = str(row.get("stimulus", "")).strip().lower().replace(" ", "")
-                row_stim_m = re.match(r'p(\d+(?:\.\d+)?)u(\d+(?:\.\d+)?)', row_stim)
+                row_stim = str(row.get("stimulus", "")).strip().lower()
+                row_stim_m = re.match(r'p\s*(\d+(?:\.\d+)?)\s*u\s*(\d+(?:\.\d+)?)', row_stim)
                 if row_stim_m:
-                    row_stim_norm = f"p{float(row_stim_m.group(1)):.1f}u{float(row_stim_m.group(2)):.1f}"
-                else:
-                    row_stim_norm = row_stim
+                    rp = float(row_stim_m.group(1))
+                    ru = float(row_stim_m.group(2))
+                    row_ori = str(row.get("orientation", "")).strip().upper()
+                    
+                    if abs(rp - target_p) < 0.01 and abs(ru - target_u) < 0.01 and row_ori == orientation:
+                        # Extract and format calibration fields
+                        intensity_raw = row.get("intensity", "unknown")
+                        intensity = str(intensity_raw).strip() if pd.notna(intensity_raw) else "unknown"
 
-                row_ori = str(row.get("orientation", "")).strip().upper()
-                if row_stim_norm == target_stim and row_ori == orientation:
-                    # extract and format calibration fields
-                    intensity_raw = row.get("intensity", "unknown")
-                    intensity = str(intensity_raw).strip() if pd.notna(intensity_raw) else "unknown"
+                        hdr_raw = row.get("hdr", None)
+                        if pd.notna(hdr_raw):
+                            try:
+                                hdr = f"{float(hdr_raw):.4f}"
+                            except Exception:
+                                hdr = str(hdr_raw)
 
-                    hdr_raw = row.get("hdr", None)
-                    if pd.notna(hdr_raw):
                         try:
-                            hdr = f"{float(hdr_raw):.4f}"
+                            xhdr_raw = row.get("xhdr", None)
+                            xhdr = f"{float(xhdr_raw):.4f}" if pd.notna(xhdr_raw) else "unknown"
                         except Exception:
-                            hdr = str(hdr_raw)
+                            xhdr = str(row.get("xhdr", "unknown"))
 
-                    # other calibration columns
-                    try:
-                        xhdr_raw = row.get("xhdr", None)
-                        xhdr = f"{float(xhdr_raw):.4f}" if pd.notna(xhdr_raw) else "unknown"
-                    except Exception:
-                        xhdr = str(row.get("xhdr", "unknown"))
+                        try:
+                            xdop_raw = row.get("xdop", None)
+                            xdop = f"{float(xdop_raw):.4f}" if pd.notna(xdop_raw) else "unknown"
+                        except Exception:
+                            xdop = str(row.get("xdop", "unknown"))
 
-                    try:
-                        xdop_raw = row.get("xdop", None)
-                        xdop = f"{float(xdop_raw):.4f}" if pd.notna(xdop_raw) else "unknown"
-                    except Exception:
-                        xdop = str(row.get("xdop", "unknown"))
+                        try:
+                            x_raw = row.get("x", None)
+                            x_val = f"{float(x_raw):.4f}" if pd.notna(x_raw) else "unknown"
+                        except Exception:
+                            x_val = str(row.get("x", "unknown"))
 
-                    try:
-                        x_raw = row.get("x", None)
-                        x_val = f"{float(x_raw):.4f}" if pd.notna(x_raw) else "unknown"
-                    except Exception:
-                        x_val = str(row.get("x", "unknown"))
+                        try:
+                            edge_raw = row.get("edge intensity (L/R)", None)
+                            edge_intensity = f"{float(edge_raw):.4f}" if pd.notna(edge_raw) else str(edge_raw).strip()
+                        except Exception:
+                            edge_intensity = str(row.get("edge intensity (L/R)", "unknown"))
 
-                    try:
-                        edge_raw = row.get("edge intensity (L/R)", None)
-                        edge_intensity = f"{float(edge_raw):.4f}" if pd.notna(edge_raw) else str(edge_raw).strip()
-                    except Exception:
-                        edge_intensity = str(row.get("edge intensity (L/R)", "unknown"))
+                        try:
+                            sig_raw = row.get("signal rank", None)
+                            signal_rank = str(sig_raw).strip() if pd.notna(sig_raw) else "unknown"
+                        except Exception:
+                            signal_rank = str(row.get("signal rank", "unknown"))
 
-                    break
+                        try:
+                            date_raw = row.get("calibration_date", None)
+                            calibration_date = str(date_raw).strip() if pd.notna(date_raw) else "unknown"
+                        except Exception:
+                            calibration_date = str(row.get("calibration_date", "unknown"))
+
+                        break
         except Exception:
             pass
 
-    # 3. Create heading
-    if p_val and u_val:
-        heading = f"Bee Trajectory - ID: {bee_id} | Stimulus: p{p_val} u{u_val} | Ori: {orientation}"
-        # append calibration metadata when available
-        meta_parts = []
-        if x_val != "unknown":
-            meta_parts.append(f"x={x_val}")
-        if xdop != "unknown":
-            meta_parts.append(f"xdop={xdop}")
-        if xhdr != "unknown":
-            meta_parts.append(f"xhdr={xhdr}")
-        if hdr != "unknown":
-            meta_parts.append(f"hdr={hdr}")
-        if intensity != "unknown":
-            meta_parts.append(f"intensity={intensity}")
-        if edge_intensity != "unknown":
-            meta_parts.append(f"edge_intensity={edge_intensity}")
-        if meta_parts:
-            heading += " (" + ", ".join(meta_parts) + ")"
-    else:
-        heading = f"Bee Trajectory - ID: {bee_id} | Video: {os.path.splitext(video_name)[0]}"
+    # 3. Create heading title exactly matching design format
+    heading = f"Cue: {orientation} | p{p_val} u{u_val} | DoP = {xdop} (n = 1 trials)"
 
     # Translate outcome
     outcome_str = "Unknown"
@@ -1403,16 +1859,29 @@ elif st.session_state.tab == "analysis":
 
     fps = st.session_state.tracking_fps
     df = build_processed_df(st.session_state.track_coords, fps, st.session_state.feeder_radius_mm)
-    # Add Bee ID, Trial Outcome and calibration metadata columns to the CSV
+    
+    # Add Bee ID, Trial Outcome and all calibration metadata columns to the CSV
     df["bee_id"] = bee_id
     df["trial_outcome"] = outcome_str
+    df["stimulus"] = f"p{p_val} u{u_val}"
     df["orientation"] = orientation
     df["x"] = x_val
     df["xdop"] = xdop
+    df["dop"] = xdop
     df["xhdr"] = xhdr
     df["hdr"] = hdr
     df["intensity"] = intensity
     df["edge_intensity"] = edge_intensity
+    df["signal_rank"] = signal_rank
+    df["calibration_date"] = calibration_date
+    
+    # Add high-precision timestamp (MM:SS.mmm)
+    timestamps = []
+    for idx, row_df in df.iterrows():
+        sec = row_df["time_sec"]
+        timestamps.append(f"{int(sec//60):02d}:{int(sec%60):02d}.{int((sec%1)*1000):03d}")
+    df["timestamp"] = timestamps
+    
     st.session_state.processed_df = df
 
     step = df["frame"].diff().dropna().median() if len(df) > 1 else 1
@@ -1437,7 +1906,7 @@ elif st.session_state.tab == "analysis":
         )
         hive_entry_mm = (hx_mm, hy_mm)
 
-    fig = plot_trajectory(df, st.session_state.entry_frame, st.session_state.exit_frame, title=heading, bee_id=bee_id, outcome=outcome_str, hive_entry_mm=hive_entry_mm)
+    fig = plot_trajectory(df, st.session_state.entry_frame, st.session_state.exit_frame, title=heading, bee_id=bee_id, outcome=outcome_str, hive_entry_mm=hive_entry_mm, orientation=orientation, p_val=p_val, u_val=u_val, dop=xdop)
     st.pyplot(fig)
 
     # 4. Trial Outcome Question
@@ -1470,18 +1939,20 @@ elif st.session_state.tab == "analysis":
     export_dir = os.path.join("results", video_dir_name)
     os.makedirs(export_dir, exist_ok=True)
 
-    # Generate tracked video if it doesn't exist yet
     video_export_path = os.path.join(export_dir, f"tracked_preview_{os.path.splitext(video_name)[0]}.mp4")
     if not os.path.exists(video_export_path):
         with st.spinner("Generating tracked preview video (this may take a moment)..."):
-            # Use the last tracked frame as the end boundary so the full tracking is visible
-            coords_sorted_local = sorted(st.session_state.track_coords, key=lambda c: c["frame"])
-            last_tracked_frame = int(coords_sorted_local[-1]["frame"]) if coords_sorted_local else st.session_state.exit_frame
+            max_f = meta["frames"] - 1
+            end_f = get_tracking_end_frame(
+                exit_frame=st.session_state.exit_frame,
+                max_frame=max_f,
+                analysis_end_frame=st.session_state.analysis_end_frame
+            )
             generate_tracked_video(
                 st.session_state.video_path,
                 st.session_state.track_coords,
                 st.session_state.entry_frame,
-                last_tracked_frame,  # Use actual last tracked frame instead of exit_frame
+                end_f,
                 video_export_path,
                 st.session_state.circle_center,
                 st.session_state.circle_radius
@@ -1490,14 +1961,11 @@ elif st.session_state.tab == "analysis":
     csv_export_path = os.path.join(export_dir, f"bee_track_{os.path.splitext(video_name)[0]}.csv")
     png_export_path = os.path.join(export_dir, f"trajectory_{os.path.splitext(video_name)[0]}.png")
     
-    # Save CSV with calibration metadata
     df.to_csv(csv_export_path, index=False)
     fig.savefig(png_export_path, dpi=200, bbox_inches="tight")
-    # Also save a 'complete trajectory' copy that includes full metadata in the title
     complete_png_path = os.path.join(export_dir, f"complete_trajectory_{os.path.splitext(video_name)[0]}.png")
     fig.savefig(complete_png_path, dpi=300, bbox_inches="tight")
 
-    # Export zone transitions and manual help points as separate CSVs (if present)
     trans = df[df["transition_event"].notna()][["frame", "time_sec", "transition_event"]]
     trans_csv_path = os.path.join(export_dir, f"zone_transitions_{os.path.splitext(video_name)[0]}.csv")
     if len(trans):
@@ -1513,7 +1981,6 @@ elif st.session_state.tab == "analysis":
             f.write(f"Bee ID: {bee_id}\n")
             f.write(f"Outcome: {outcome_str}\n")
 
-    # Zip the archive
     tmp_zip_base = os.path.join(tempfile.gettempdir(), video_dir_name)
     zip_archive_path = shutil.make_archive(tmp_zip_base, 'zip', export_dir)
 
@@ -1555,3 +2022,7 @@ elif st.session_state.tab == "analysis":
         file_name=f"trajectory_{os.path.splitext(st.session_state.video_name)[0]}.png",
         mime="image/png",
     )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# Sync flat keys back to active slot at the end of execution
+sync_flat_to_active_slot()
