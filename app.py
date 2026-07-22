@@ -603,8 +603,13 @@ def plot_trajectory(df, entry_frame=None, exit_frame=None, title="Bee Trajectory
                 bbox=dict(boxstyle="circle,pad=0.1", fc="white", ec="#1a53ff", lw=1))
 
     ax.plot(0, 0, "o", color="#FB8500", ms=10, label="Feeder (0,0)")
-    ax.set_xlim(-460, 460)
-    ax.set_ylim(-460, 460)
+    # Dynamic axis limits to ensure all elements (circles and path) are fully visible
+    max_val = float(max(OUTER_RADIUS_MM + 20.0,
+                        np.max(np.abs(x_mm)) if len(x_mm) > 0 else 0,
+                        np.max(np.abs(y_mm)) if len(y_mm) > 0 else 0))
+    lim = max_val + 20.0
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
     ax.set_aspect("equal")
     ax.grid(True, ls=":", alpha=0.4)
     ax.set_xlabel("X (mm)")
@@ -1517,7 +1522,7 @@ elif st.session_state.tab == "track":
                             sync_active_slot_to_flat()
                             st.rerun()
             else:
-                st.image(vis_rgb, use_container_width=True)
+                st.image(vis_rgb)
 
             pc1, pc2, pc3 = st.columns([5, 2, 2])
             with pc1:
@@ -1917,14 +1922,17 @@ elif st.session_state.tab == "analysis":
     with col_out1:
         if st.button("🟢 Yes, the bee went back", use_container_width=True):
             st.session_state.bee_went_back = True
+            sync_flat_to_active_slot()
             st.rerun()
     with col_out2:
         if st.button("🔴 No, still in arena", use_container_width=True):
             st.session_state.bee_went_back = False
+            sync_flat_to_active_slot()
             st.rerun()
     with col_out3:
         if st.button("⚪ Unknown", use_container_width=True):
             st.session_state.bee_went_back = "unknown"
+            sync_flat_to_active_slot()
             st.rerun()
 
     if st.session_state.bee_went_back is True:
@@ -1942,6 +1950,7 @@ elif st.session_state.tab == "analysis":
     video_export_path = os.path.join(export_dir, f"tracked_preview_{os.path.splitext(video_name)[0]}.mp4")
     if not os.path.exists(video_export_path):
         with st.spinner("Generating tracked preview video (this may take a moment)..."):
+            meta = video_meta(st.session_state.video_path)
             max_f = meta["frames"] - 1
             end_f = get_tracking_end_frame(
                 exit_frame=st.session_state.exit_frame,
@@ -2022,6 +2031,49 @@ elif st.session_state.tab == "analysis":
         file_name=f"trajectory_{os.path.splitext(st.session_state.video_name)[0]}.png",
         mime="image/png",
     )
+    
+    st.markdown("---")
+    if st.button("⚡ Start New Tracking Session", use_container_width=True, type="secondary"):
+        for key in list(st.session_state.keys()):
+            if key not in ("slots", "num_slots", "active_slot"):
+                del st.session_state[key]
+        st.session_state.slots = [
+            {
+                "video_path": None,
+                "video_name": "",
+                "selected_video_index": None,
+                "circle_center": None,
+                "circle_radius": None,
+                "inner_circle_center": None,
+                "inner_circle_radius": None,
+                "hive_entry_point": None,
+                "scale_factor": None,
+                "entry_frame": None,
+                "entry_point": None,
+                "exit_frame": None,
+                "exit_point": None,
+                "analysis_end_frame": None,
+                "analysis_end_point": None,
+                "track_coords": [],
+                "track_state": None,
+                "track_phase": "idle",
+                "tracking_lost": False,
+                "bee_went_back": "unknown",
+                "processed_df": None,
+                "player_frame": 0,
+                "last_player_frame": 0,
+                "timeline_slider": 0,
+                "frame_number_input": 0,
+                "feeder_radius_mm": 40.0,
+                "tracking_fps": 30.0,
+            }
+            for _ in range(4)
+        ]
+        st.session_state.num_slots = 1
+        st.session_state.active_slot = 0
+        st.session_state.tab = "load"
+        st.rerun()
+
     st.markdown("</div>", unsafe_allow_html=True)
 
 # Sync flat keys back to active slot at the end of execution
