@@ -100,7 +100,25 @@ plot_circular_bearing(angles, 'Figure 12: Strong Polarization (TB)', 'fig12_stro
     with col6:
         f18 = "results/paper_plots/fig18_boxplot_deviation_from_nest.png"
         if os.path.exists(f18):
-            st.image(f18, caption="Figure 18: Boxplot Deviation from Nest")
+            st.image(f18, caption="Figure 18: Boxplot Deviation from Nest (Cleaned Boxplots)")
+
+    st.divider()
+
+    # Figures 24, 25, 26: Movement Speed, Memory, and Feeder Visit Rate
+    st.subheader("Movement Speed, Memory Preference & Feeder Visit Analysis (Figures 24–26)")
+    col7, col8 = st.columns(2)
+    with col7:
+        f24 = "results/paper_plots/fig24_speed_of_movement_analysis.png"
+        if os.path.exists(f24):
+            st.image(f24, caption="Figure 24: Speed of Movement Analysis (mm/s)")
+    with col8:
+        f25 = "results/paper_plots/fig25_short_vs_long_term_memory.png"
+        if os.path.exists(f25):
+            st.image(f25, caption="Figure 25: Short-Term (STM) vs Long-Term Memory (LTM) Preference (%)")
+
+    f26 = "results/paper_plots/fig26_feeder_visit_percentage.png"
+    if os.path.exists(f26):
+        st.image(f26, caption="Figure 26: Feeder Visit Percentage Rate (%) across Conditions")
 
 
 # ── TAB 2: Session Trajectories ─────────────────────────────────────────────

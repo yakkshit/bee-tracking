@@ -1700,9 +1700,13 @@ elif st.session_state.tab == "analysis":
             video_name = slot["video_name"]
             import re
             bee_id = "unknown"
-            match_id = re.search(r'\b(R[_\s]*\d+)\b', video_name, re.IGNORECASE)
+            match_id = re.search(r'(\d+[wWgGbByYoOrRpP])', video_name)
             if match_id:
-                bee_id = match_id.group(1).upper().replace("_", "").replace(" ", "")
+                bee_id = match_id.group(1).lower()
+            else:
+                match_id_r = re.search(r'\b(R[_\s]*\d+)\b', video_name, re.IGNORECASE)
+                if match_id_r:
+                    bee_id = match_id_r.group(1).upper().replace("_", "").replace(" ", "")
             
             df_temp = build_processed_df(slot["track_coords"], slot.get("tracking_fps") or 30.0, slot.get("feeder_radius_mm") or 40.0)
             step = df_temp["frame"].diff().dropna().median() if len(df_temp) > 1 else 1
@@ -1750,10 +1754,14 @@ elif st.session_state.tab == "analysis":
     p_val = "unknown"
     u_val = "unknown"
 
-    # Robust parser for R13 / R_13 / R 13
-    match_id = re.search(r'\b(R[_\s]*\d+)\b', video_name, re.IGNORECASE)
+    # Robust parser for Bee ID (e.g., 49w, 69w, 70g, 21w, R13)
+    match_id = re.search(r'(\d+[wWgGbByYoOrRpP])', video_name)
     if match_id:
-        bee_id = match_id.group(1).upper().replace("_", "").replace(" ", "")
+        bee_id = match_id.group(1).lower()
+    else:
+        match_id_r = re.search(r'\b(R[_\s]*\d+)\b', video_name, re.IGNORECASE)
+        if match_id_r:
+            bee_id = match_id_r.group(1).upper().replace("_", "").replace(" ", "")
 
     # Parse Orientation (LR or TB)
     match_ori = re.search(r'\b(LR|TB)\b', video_name, re.IGNORECASE)
@@ -1990,6 +1998,23 @@ elif st.session_state.tab == "analysis":
             f.write(f"Bee ID: {bee_id}\n")
             f.write(f"Outcome: {outcome_str}\n")
 
+    # Generate full analysis plot suite automatically upon tracking completion
+    try:
+        from analysis.fixed_version import process_single_trial
+        process_single_trial(export_dir)
+    except Exception as e:
+        st.warning(f"Note: Could not auto-generate fixed trajectory plots: {e}")
+
+    try:
+        from generate_plots_for_sessions import STEPS
+        for label, fn in STEPS:
+            try:
+                fn(df, export_dir)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     tmp_zip_base = os.path.join(tempfile.gettempdir(), video_dir_name)
     zip_archive_path = shutil.make_archive(tmp_zip_base, 'zip', export_dir)
 
@@ -2015,6 +2040,25 @@ elif st.session_state.tab == "analysis":
     if len(help_tags):
         st.markdown("**Manual help points**")
         st.dataframe(help_tags, use_container_width=True, hide_index=True)
+
+    st.markdown("### 📊 Generated Analysis Plots")
+    plots_folder = os.path.join(export_dir, "plots")
+    png_files = []
+    if os.path.exists(plots_folder):
+        png_files.extend([os.path.join(plots_folder, f) for f in os.listdir(plots_folder) if f.endswith(".png")])
+    for f in os.listdir(export_dir):
+        if f.endswith(".png"):
+            png_files.append(os.path.join(export_dir, f))
+    
+    png_files = sorted(list(set(png_files)))
+    if png_files:
+        cols = st.columns(2)
+        for idx, img_path in enumerate(png_files):
+            col = cols[idx % 2]
+            title = os.path.splitext(os.path.basename(img_path))[0].replace("_", " ").title()
+            col.image(img_path, caption=title, use_container_width=True)
+    else:
+        st.info("No plot images found.")
 
     st.download_button(
         "Download CSV",

@@ -76,6 +76,30 @@ def project_to_circle(x, y, radius):
     return x * radius / d, y * radius / d
 
 
+def get_hive_position(df, outer_r=OUTER_R, hive_dist=HIVE_DIST):
+    if df is not None and len(df) > 0:
+        tag = str(df.iloc[0].get("tag_type", "")).strip().lower()
+        if tag == "auto":
+            return 0.0, -hive_dist
+
+    if df is None or len(df) == 0:
+        return 0.0, -hive_dist
+
+    x_all = df["x_mm"].values
+    y_all = df["y_mm"].values
+    dists = df["distance_from_center_mm"].values if "distance_from_center_mm" in df.columns else np.hypot(x_all, y_all)
+
+    outer_entries = [i for i in range(1, len(dists)) if dists[i-1] > outer_r and dists[i] <= outer_r]
+    if outer_entries:
+        idx = outer_entries[0]
+        xe, ye = x_all[idx], y_all[idx]
+        d = np.hypot(xe, ye)
+        if d >= 1.0:
+            return xe * hive_dist / d, ye * hive_dist / d
+
+    return 0.0, -hive_dist
+
+
 def generate_multiple_entries_plot(df, session_dir):
     plots_dir = os.path.join(session_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
@@ -162,10 +186,7 @@ def generate_multiple_entries_plot(df, session_dir):
         ax.plot(mean_x, mean_y, color="#000000", lw=2.5, zorder=6, label="Mean Trajectory")
 
     # Hive Marker OUTSIDE outer boundary
-    orient = str(df.iloc[0].get("orientation", "LR")).strip().upper()
-    hive_angle = np.pi / 2 if orient == "TB" else 0.0
-    hive_x = HIVE_DIST * np.cos(hive_angle)
-    hive_y = HIVE_DIST * np.sin(hive_angle)
+    hive_x, hive_y = get_hive_position(df)
     ax.plot(hive_x, hive_y, "o", color="#333333", markersize=10, markeredgecolor="#111111", markeredgewidth=1.5, zorder=12)
     ax.annotate("Hive", (hive_x, hive_y), textcoords="offset points", xytext=(12, 0), fontsize=9, fontweight="bold", color="#333333", va="center", zorder=13)
 
@@ -181,8 +202,45 @@ def generate_multiple_entries_plot(df, session_dir):
     
     ax.set_title(title_str, fontsize=11, fontweight="bold", pad=20)
 
-    # ── Metadata Overlay (Bee ID & Outcome) ─────────────────────────────
-    bee_id = str(df.iloc[0].get("bee_id", "unknown")).strip()
+import re
+
+def extract_bee_id(session_dir, df=None):
+    if session_dir and os.path.exists(os.path.join(session_dir, "trial_outcome.txt")):
+        try:
+            with open(os.path.join(session_dir, "trial_outcome.txt"), "r") as f:
+                for line in f:
+                    if "Bee ID:" in line:
+                        bid = line.replace("Bee ID:", "").strip()
+                        if bid and bid.lower() not in ("unknown", "nan"):
+                            return bid.upper()
+        except Exception:
+            pass
+
+    if df is not None and not df.empty and "bee_id" in df.columns:
+        bid = str(df.iloc[0]["bee_id"]).strip()
+        if bid and bid.lower() not in ("unknown", "nan"):
+            return bid.upper()
+
+    sess_name = os.path.basename(os.path.normpath(session_dir)) if session_dir else ""
+    m = re.search(r'\b(\d+[wWgG])\b', sess_name)
+    if m:
+        return m.group(1).upper()
+    m2 = re.search(r'(\d+[wWgG])', sess_name)
+    if m2:
+        return m2.group(1).upper()
+
+    if "unmarked" in sess_name.lower():
+        return "unmarked"
+
+    m3 = re.search(r'(?:^|[._])([RGWBYOP]_\d+|[RGWBYOP]\d+)(?:[._]|$)', sess_name, re.IGNORECASE)
+    if m3:
+        return m3.group(1).upper()
+
+    return "Unknown"
+
+
+# ── Metadata Overlay (Bee ID & Outcome) ─────────────────────────────
+    bee_id = extract_bee_id(session_dir, df)
     outcome = str(df.iloc[0].get("trial_outcome", "unknown")).strip()
     
     outcome_file = os.path.join(session_dir, "trial_outcome.txt")
@@ -191,9 +249,7 @@ def generate_multiple_entries_plot(df, session_dir):
             with open(outcome_file, "r") as f:
                 txt = f.read().strip()
                 for line in txt.split("\n"):
-                    if "Bee ID:" in line:
-                        bee_id = line.replace("Bee ID:", "").strip()
-                    elif "Outcome:" in line:
+                    if "Outcome:" in line:
                         outcome = line.replace("Outcome:", "").strip()
                     elif txt and ":" not in txt:
                         outcome = txt

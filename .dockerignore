@@ -1,0 +1,16 @@
+.venv/
+.venv_new/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+.git/
+.gitignore
+.claude/
+.cursor/
+.gemini/
+results/
+scratch/
+ignore/
+yolo11n.pt

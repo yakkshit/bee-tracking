@@ -15,6 +15,7 @@ Output: results/<session>/plots/single_colour.png
 Does NOT modify any existing plot files.
 """
 import os
+import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -37,6 +38,70 @@ C_OUTBOUND = "#1E88E5"   # blue
 C_ENTRY    = "#2E7D32"   # green
 C_EXIT     = "#0D47A1"   # dark blue
 C_FEEDER   = "#F57C00"   # orange
+
+
+def extract_bee_id(session_dir, df=None):
+    if session_dir and os.path.exists(os.path.join(session_dir, "trial_outcome.txt")):
+        try:
+            with open(os.path.join(session_dir, "trial_outcome.txt"), "r") as f:
+                for line in f:
+                    if "Bee ID:" in line:
+                        bid = line.replace("Bee ID:", "").strip()
+                        if bid and bid.lower() not in ("unknown", "nan"):
+                            return bid.upper()
+        except Exception:
+            pass
+
+    if df is not None and not df.empty and "bee_id" in df.columns:
+        bid = str(df.iloc[0]["bee_id"]).strip()
+        if bid and bid.lower() not in ("unknown", "nan"):
+            return bid.upper()
+
+    sess_name = os.path.basename(os.path.normpath(session_dir)) if session_dir else ""
+    m = re.search(r'\b(\d+[wWgG])\b', sess_name)
+    if m:
+        return m.group(1).upper()
+    m2 = re.search(r'(\d+[wWgG])', sess_name)
+    if m2:
+        return m2.group(1).upper()
+
+    if "unmarked" in sess_name.lower():
+        return "unmarked"
+
+    m3 = re.search(r'(?:^|[._])([RGWBYOP]_\d+|[RGWBYOP]\d+)(?:[._]|$)', sess_name, re.IGNORECASE)
+    if m3:
+        return m3.group(1).upper()
+
+    return "Unknown"
+
+
+def get_hive_position(df, outer_r=OUTER_R, hive_dist=HIVE_DIST):
+    """
+    Compute Hive position.
+    For TRex auto sessions (tag_type == 'auto'), Hive is at bottom center (0, -450).
+    For manual sessions, projects first entry point or falls back to bottom center.
+    """
+    if df is not None and len(df) > 0:
+        tag = str(df.iloc[0].get("tag_type", "")).strip().lower()
+        if tag == "auto":
+            return 0.0, -hive_dist
+
+    if df is None or len(df) == 0:
+        return 0.0, -hive_dist
+
+    x_all = df["x_mm"].values
+    y_all = df["y_mm"].values
+    dists = df["distance_from_center_mm"].values if "distance_from_center_mm" in df.columns else np.hypot(x_all, y_all)
+
+    outer_entries = [i for i in range(1, len(dists)) if dists[i-1] > outer_r and dists[i] <= outer_r]
+    if outer_entries:
+        idx = outer_entries[0]
+        xe, ye = x_all[idx], y_all[idx]
+        d = np.hypot(xe, ye)
+        if d >= 1.0:
+            return xe * hive_dist / d, ye * hive_dist / d
+
+    return 0.0, -hive_dist
 
 
 def smooth(x, y, strength=17):
@@ -142,6 +207,8 @@ def generate_single_colour(df, session_dir):
         if first_outer_entry <= ie <= feeder_idx:
             first_inner_entry = ie
             break
+    if first_inner_entry is None:
+        first_inner_entry = first_outer_entry
 
     first_inner_exit = None
     for ix in inner_exits:
@@ -154,6 +221,8 @@ def generate_single_colour(df, session_dir):
         if ox >= feeder_idx:
             first_outer_exit = ox
             break
+    if first_outer_exit is None:
+        first_outer_exit = len(df) - 1
 
     # Prepare inbound & outbound segments
     inbound_end = feeder_idx
@@ -177,6 +246,44 @@ def generate_single_colour(df, session_dir):
     ax.text(0, -28, "Feeder", color=C_FEEDER, fontsize=11,
             fontweight="bold", ha="center", va="top", zorder=10)
 
+    # ── Entry/Exit Markers Determination ────────────────────────────────
+    if outer_entries:
+        ex, ey = project_to_circle(x_all[outer_entries[0]], y_all[outer_entries[0]], OUTER_R)
+    else:
+        ex, ey = 0.0, -OUTER_R
+
+    if inner_entries:
+        iex, iey = project_to_circle(x_all[inner_entries[0]], y_all[inner_entries[0]], INNER_R)
+    else:
+        iex, iey = 0.0, -INNER_R
+
+    if inner_exits:
+        ioex, ioey = project_to_circle(x_all[inner_exits[0]], y_all[inner_exits[0]], INNER_R)
+    else:
+        ioex, ioey = project_to_circle(x_all[-1], y_all[-1], INNER_R)
+
+    if outer_exits:
+        fx, fy = project_to_circle(x_all[outer_exits[-1]], y_all[outer_exits[-1]], OUTER_R)
+    else:
+        fx, fy = project_to_circle(x_all[-1], y_all[-1], OUTER_R)
+
+    # Prepend smooth entry segment if tracking started inside outer circle
+    if not outer_entries and len(in_x) > 0:
+        pts = np.array([[ex, ey], [iex, iey], [in_x[0], in_y[0]]])
+        t = np.linspace(0, 1, len(pts))
+        try:
+            from scipy.interpolate import make_interp_spline
+            spl_x = make_interp_spline(t, pts[:, 0], k=2)
+            spl_y = make_interp_spline(t, pts[:, 1], k=2)
+            t_fine = np.linspace(0, 1, 30)
+            in_x = np.concatenate([spl_x(t_fine), in_x])
+            in_y = np.concatenate([spl_y(t_fine), in_y])
+        except Exception:
+            entry_x = np.linspace(ex, in_x[0], 30)
+            entry_y = np.linspace(ey, in_y[0], 30)
+            in_x = np.concatenate([entry_x, in_x])
+            in_y = np.concatenate([entry_y, in_y])
+
     # ── Inbound path: grey dotted ────────────────────────────────────────
     if len(in_x) > 1:
         ax.plot(in_x, in_y, linestyle=":", color=C_INBOUND, lw=1.5, zorder=4)
@@ -188,41 +295,27 @@ def generate_single_colour(df, session_dir):
         add_arrows(ax, out_x, out_y, color=C_OUTBOUND, num=2, zorder=5)
 
     # ── Entry marker (green ▲ on outer circle) ──────────────────────────
-    ex, ey = project_to_circle(x_all[first_outer_entry],
-                                y_all[first_outer_entry], OUTER_R)
     ax.plot(ex, ey, "^", color=C_ENTRY, markersize=11, zorder=11)
     ax.annotate("①", (ex, ey), textcoords="offset points", xytext=(-14, 0),
                 fontsize=9, color=C_ENTRY, fontweight="bold",
                 ha="center", va="center", zorder=12)
 
     # ── 1st Inner entry marker (red ◆ on inner circle) ────────────────────
-    if first_inner_entry is not None:
-        iex, iey = project_to_circle(x_all[first_inner_entry],
-                                      y_all[first_inner_entry], INNER_R)
-        ax.plot(iex, iey, "D", color="#D32F2F", markersize=8, zorder=11)
+    ax.plot(iex, iey, "D", color="#D32F2F", markersize=8, zorder=11)
 
     # ── 1st Inner exit marker (purple ◆ on inner circle) ─────────────────
-    if first_inner_exit is not None:
-        ioex, ioey = project_to_circle(x_all[first_inner_exit],
-                                        y_all[first_inner_exit], INNER_R)
-        ax.plot(ioex, ioey, "D", color="#7B1FA2", markersize=8, zorder=11)
+    ax.plot(ioex, ioey, "D", color="#7B1FA2", markersize=8, zorder=11)
 
     # ── Exit marker (blue ● on outer circle) ─────────────────────────────
-    if first_outer_exit is not None:
-        fx, fy = project_to_circle(x_all[first_outer_exit],
-                                    y_all[first_outer_exit], OUTER_R)
-        ax.plot(fx, fy, "o", color=C_EXIT, markersize=9, zorder=11)
-        ax.annotate("①", (fx, fy), textcoords="offset points", xytext=(12, -12),
-                    fontsize=9, color=C_EXIT, fontweight="bold",
-                    ha="center", va="center", zorder=12,
-                    bbox=dict(boxstyle="circle,pad=0.1", fc="white",
-                              ec=C_EXIT, lw=1.0))
+    ax.plot(fx, fy, "o", color=C_EXIT, markersize=9, zorder=11)
+    ax.annotate("①", (fx, fy), textcoords="offset points", xytext=(12, -12),
+                fontsize=9, color=C_EXIT, fontweight="bold",
+                ha="center", va="center", zorder=12,
+                bbox=dict(boxstyle="circle,pad=0.1", fc="white",
+                          ec=C_EXIT, lw=1.0))
 
-    # ── Hive marker OUTSIDE the outer boundary ──────────────────────────
-    orient = str(df.iloc[0].get("orientation", "LR")).strip().upper()
-    hive_angle = np.pi / 2 if orient == "TB" else 0.0
-    hive_x = HIVE_DIST * np.cos(hive_angle)
-    hive_y = HIVE_DIST * np.sin(hive_angle)
+    # ── Hive marker OUTSIDE the outer boundary (at original Red X exit direction) ──
+    hive_x, hive_y = get_hive_position(df)
     ax.plot(hive_x, hive_y, "o", color="#333333", markersize=10,
             markeredgecolor="#111111", markeredgewidth=1.5, zorder=12)
     ax.annotate("Hive", (hive_x, hive_y), textcoords="offset points",
@@ -242,7 +335,7 @@ def generate_single_colour(df, session_dir):
     ax.set_title(title_str, fontsize=11, fontweight="bold", pad=20)
 
     # ── Metadata Overlay (Bee ID & Outcome) ─────────────────────────────
-    bee_id = str(df.iloc[0].get("bee_id", "unknown")).strip()
+    bee_id = extract_bee_id(session_dir, df)
     outcome = str(df.iloc[0].get("trial_outcome", "unknown")).strip()
     
     outcome_file = os.path.join(session_dir, "trial_outcome.txt")
@@ -251,10 +344,10 @@ def generate_single_colour(df, session_dir):
             with open(outcome_file, "r") as f:
                 txt = f.read().strip()
                 for line in txt.split("\n"):
-                    if "Bee ID:" in line:
-                        bee_id = line.replace("Bee ID:", "").strip()
-                    elif "Outcome:" in line:
+                    if "Outcome:" in line:
                         outcome = line.replace("Outcome:", "").strip()
+                    elif "FixedOutcome:" in line:
+                        outcome = line.replace("FixedOutcome:", "").strip()
                     elif txt and ":" not in txt:
                         outcome = txt
         except Exception: pass

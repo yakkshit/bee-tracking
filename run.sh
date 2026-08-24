@@ -1,8 +1,50 @@
 #!/bin/bash
 
-# Cross-platform startup script for Bee Arena Tracker (macOS, Linux, and Windows Git Bash/WSL)
+# Cross-platform interactive launcher for Bee Arena Tracker
 
-echo "=== Starting Bee Arena Tracker ==="
+# If already inside a Docker container, execute app directly
+if [ -f "/.dockerenv" ]; then
+    echo "=== Starting Bee Arena Tracker inside Docker container ==="
+    streamlit run app.py
+    exit 0
+fi
+
+echo "================================================="
+echo "          🐝 BEE ARENA TRACKER LAUNCHER          "
+echo "================================================="
+echo "How would you like to run the application?"
+echo "  [1] Locally (Python virtualenv)"
+echo "  [2] Docker (Containerized)"
+echo "================================================="
+read -p "Select option (1 or 2) [Default: 1]: " CHOICE
+
+CHOICE=${CHOICE:-1}
+
+if [ "$CHOICE" == "2" ]; then
+    echo ""
+    echo "=== Launching with Docker ==="
+    
+    # Check if Docker is installed & running
+    if ! command -v docker &>/dev/null; then
+        echo "Error: Docker command not found. Please install Docker first."
+        exit 1
+    fi
+    
+    if ! docker info &>/dev/null; then
+        echo "Error: Docker daemon is not running. Please start Docker Desktop and try again."
+        exit 1
+    fi
+
+    if command -v docker-compose &>/dev/null; then
+        docker-compose up --build
+    else
+        docker compose up --build
+    fi
+    exit 0
+fi
+
+echo ""
+echo "=== Launching Locally ==="
 
 # Detect OS
 OS_TYPE="Unknown"
@@ -15,7 +57,7 @@ elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]];
 fi
 echo "Detected OS: $OS_TYPE"
 
-# Determine the virtual environment activation script path
+# Determine virtual environment activation path
 ACTIVATE_PATH=""
 if [ -d ".venv" ]; then
     if [ -f ".venv/bin/activate" ]; then
@@ -25,13 +67,13 @@ if [ -d ".venv" ]; then
     fi
 fi
 
-# Activate virtual environment if found
-if [ -n "$ACTIVATE_PATH" ]; then
+if [ -n "$VIRTUAL_ENV" ]; then
+    echo "Using currently active virtual environment: $VIRTUAL_ENV"
+elif [ -n "$ACTIVATE_PATH" ]; then
     echo "Activating virtual environment: $ACTIVATE_PATH"
     source "$ACTIVATE_PATH"
 else
     echo "No .venv found. Checking Python/Pip..."
-    # Fallback to system Python
     if command -v python3 &>/dev/null; then
         PYTHON_CMD="python3"
     elif command -v python &>/dev/null; then
@@ -52,18 +94,13 @@ else
     
     if [ -n "$ACTIVATE_PATH" ]; then
         source "$ACTIVATE_PATH"
-    else
-        echo "Error: Could not activate virtual environment."
-        exit 1
     fi
 fi
 
-# Ensure dependencies are installed
 if [ -f "requirements.txt" ]; then
     echo "Checking dependencies..."
-    pip install -r requirements.txt
+    pip install -r requirements.txt --quiet
 fi
 
-# Start Streamlit application
 echo "Launching Streamlit application..."
 streamlit run app.py

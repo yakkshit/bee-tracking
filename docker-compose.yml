@@ -1,0 +1,14 @@
+services:
+  bee-arena-tracker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bee_arena_tracker
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app
+      - ${HOME:-~}:/host_home:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
