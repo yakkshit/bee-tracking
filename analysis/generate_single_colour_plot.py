@@ -380,7 +380,7 @@ def generate_single_colour(df, session_dir):
         Line2D([0], [0], marker="o", color="w", markerfacecolor=C_FEEDER,
                markersize=9, label="Feeder (0,0)"),
     ]
-    ax.legend(handles=legend_els, loc="upper right", frameon=True,
+    ax.legend(handles=legend_els, bbox_to_anchor=(1.04, 1.0), loc="upper left", frameon=True,
               facecolor="white", edgecolor="#d0d0d0", fontsize=8.5,
               borderpad=0.6, labelspacing=0.4, handletextpad=0.5)
 

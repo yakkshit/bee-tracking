@@ -266,7 +266,7 @@ def extract_bee_id(session_dir, df=None):
     ax.set_aspect("equal")
     ax.axis("off")
 
-    ax.legend(loc="upper right", frameon=True, facecolor="white", edgecolor="#d0d0d0", fontsize=8.5, borderpad=0.5, labelspacing=0.35)
+    ax.legend(bbox_to_anchor=(1.04, 1.0), loc="upper left", frameon=True, facecolor="white", edgecolor="#d0d0d0", fontsize=8.5, borderpad=0.5, labelspacing=0.35)
 
     fig.savefig(os.path.join(plots_dir, "multiple_entries_exits.png"), dpi=300, bbox_inches="tight")
     plt.close(fig)

@@ -62,6 +62,35 @@ def smooth_and_interpolate(x, y, t, max_pts=400):
     return x_interp, y_interp, t_interp
 
 
+def get_hive_position(df, outer_r=OUTER_R, hive_dist=HIVE_DIST):
+    if df is None or len(df) == 0:
+        return 0.0, -hive_dist
+    x_all = df["x_mm"].values
+    y_all = df["y_mm"].values
+    dists = df["distance_from_center_mm"].values if "distance_from_center_mm" in df.columns else np.hypot(x_all, y_all)
+    if "tag_type" in df.columns:
+        entry_rows = df[df["tag_type"] == "entry"]
+        if not entry_rows.empty:
+            xe = float(entry_rows.iloc[0]["x_mm"])
+            ye = float(entry_rows.iloc[0]["y_mm"])
+            d = np.hypot(xe, ye)
+            if d >= 1.0:
+                return xe * hive_dist / d, ye * hive_dist / d
+    outer_entries = [i for i in range(1, len(dists)) if dists[i-1] > outer_r and dists[i] <= outer_r]
+    if outer_entries:
+        idx = outer_entries[0]
+        xe, ye = x_all[idx], y_all[idx]
+        d = np.hypot(xe, ye)
+        if d >= 1.0:
+            return xe * hive_dist / d, ye * hive_dist / d
+    if len(x_all) > 0:
+        xe, ye = x_all[0], y_all[0]
+        d = np.hypot(xe, ye)
+        if d >= 1.0:
+            return xe * hive_dist / d, ye * hive_dist / d
+    return 0.0, -hive_dist
+
+
 def generate_feeder_to_inner_plot(df, session_dir):
     plots_dir = os.path.join(session_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
@@ -88,50 +117,29 @@ def generate_feeder_to_inner_plot(df, session_dir):
     if len(inner_contacts) > 0:
         inner_idx = feeder_idx + inner_contacts[0]
     else:
-        # Fallback to max distance point if exact threshold isn't crossed
-        inner_idx = feeder_idx + np.argmax(post_feeder_dists)
+        inner_idx = len(df) - 1
 
-    if inner_idx <= feeder_idx:
-        inner_idx = min(feeder_idx + 20, len(df) - 1)
+    x_seg = x_all[feeder_idx:inner_idx + 1]
+    y_seg = y_all[feeder_idx:inner_idx + 1]
+    t_seg = t_all[feeder_idx:inner_idx + 1]
 
-    x_slice = x_all[feeder_idx : inner_idx + 1]
-    y_slice = y_all[feeder_idx : inner_idx + 1]
-    t_slice = t_all[feeder_idx : inner_idx + 1]
-
-    if len(x_slice) < 2:
+    if len(x_seg) < 3:
         return
 
-    # Smooth and interpolate for seamless gradient
-    x_s, y_s, t_s = smooth_and_interpolate(x_slice, y_slice, t_slice)
+    # 3. Continuous smooth interpolation
+    x_smooth, y_smooth, t_smooth = smooth_and_interpolate(x_seg, y_seg, t_seg)
 
-    # 3. Create single point-to-point LineCollection
-    pts = np.column_stack([x_s, y_s]).reshape(-1, 1, 2)
-    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+    # 4. Two-color line collection
+    points = np.column_stack([x_smooth, y_smooth]).reshape(-1, 1, 2)
+    segments = np.concatenate([points[:-1], points[1:]], axis=1)
 
-    t_segments = (t_s[:-1] + t_s[1:]) / 2.0
-    norm = plt.Normalize(t_s.min(), t_s.max())
+    norm = plt.Normalize(t_smooth.min(), t_smooth.max())
+    lc = LineCollection(segments, cmap=YGB_CMAP, norm=norm, linewidth=2.2, capstyle="round", joinstyle="round", zorder=5)
+    lc.set_array((t_smooth[:-1] + t_smooth[1:]) / 2.0)
 
-    lc = LineCollection(
-        segs,
-        cmap=YGB_CMAP,
-        norm=norm,
-        linewidth=2.0,
-        capstyle="round",
-        joinstyle="round",
-        zorder=4
-    )
-    lc.set_array(t_segments)
+    # 5. Plot setup
+    fig, ax = plt.subplots(figsize=(8.5, 8.5), facecolor="white")
 
-    # 4. Plot over clean polar background with light gray ring overlays
-    fig, ax = plt.subplots(figsize=(8, 8), facecolor="white")
-
-    # Grey shaded ring between inner and outer circle (arena layout)
-    outer_ring = Circle((0, 0), OUTER_R, facecolor="#f0f0f0", edgecolor="none", zorder=0)
-    inner_white = Circle((0, 0), INNER_R, facecolor="white", edgecolor="none", zorder=0.5)
-    ax.add_patch(outer_ring)
-    ax.add_patch(inner_white)
-
-    # Arena boundaries
     ax.add_patch(Circle((0, 0), OUTER_R, fill=False, ec="#333333", lw=2.0, zorder=1))
     ax.add_patch(Circle((0, 0), INNER_R, fill=False, ec="#b0b0b0", lw=1.2, ls="--", zorder=2))
     ax.add_patch(Circle((0, 0), FEEDER_R, fc="#fff8e1", ec="#ffa000", lw=1.2, zorder=3))
@@ -140,16 +148,12 @@ def generate_feeder_to_inner_plot(df, session_dir):
     ax.add_collection(lc)
 
     # Hive marker outside outer boundary
-    tag_type = str(df.iloc[0].get("tag_type", "")).strip().lower()
-    orient = str(df.iloc[0].get("orientation", "LR")).strip().upper()
-    if tag_type == "auto":
-        hive_x, hive_y = 0.0, -HIVE_DIST
-    else:
-        hive_angle = np.pi / 2 if orient == "TB" else 0.0
-        hive_x = HIVE_DIST * np.cos(hive_angle)
-        hive_y = HIVE_DIST * np.sin(hive_angle)
+    hive_x, hive_y = get_hive_position(df)
     ax.plot(hive_x, hive_y, "o", color="#333333", markersize=9, markeredgecolor="#111111", markeredgewidth=1.2, zorder=10)
-    ax.annotate("Hive", (hive_x, hive_y), textcoords="offset points", xytext=(10, 0), fontsize=9, fontweight="bold", color="#333333", va="center", zorder=11)
+    ax.annotate("Hive", (hive_x, hive_y), textcoords="offset points",
+                xytext=(10, 0) if abs(hive_x) > 200 else (0, -20),
+                fontsize=9, fontweight="bold", color="#333333",
+                va="center", ha="left" if hive_x >= 0 else "right", zorder=11)
 
     # Feeder label at center
     ax.plot(0, 0, "o", color="#ffa000", markersize=8, zorder=10)

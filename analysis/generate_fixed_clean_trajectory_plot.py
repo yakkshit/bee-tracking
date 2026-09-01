@@ -99,18 +99,25 @@ def smooth(x, y, strength=15):
     return xs, ys
 
 
-def clip_points_to_arena(x, y, max_r=OUTER_R):
+def clip_points_to_arena(x, y, t=None, max_r=OUTER_R):
     """Clip trajectory points strictly to inside or on the arena boundary circle (R <= max_r)."""
     x_clipped, y_clipped = [], []
-    for xi, yi in zip(x, y):
+    t_clipped = [] if t is not None else None
+    for i, (xi, yi) in enumerate(zip(x, y)):
         d = np.hypot(xi, yi)
         if d <= max_r:
             x_clipped.append(xi)
             y_clipped.append(yi)
+            if t is not None:
+                t_clipped.append(t[i])
         else:
             # Project onto exact boundary circle
             x_clipped.append(xi * max_r / d)
             y_clipped.append(yi * max_r / d)
+            if t is not None:
+                t_clipped.append(t[i])
+    if t is not None:
+        return np.array(x_clipped), np.array(y_clipped), np.array(t_clipped)
     return np.array(x_clipped), np.array(y_clipped)
 
 
@@ -144,9 +151,11 @@ def get_hive_position(df, outer_r=OUTER_R, hive_dist=HIVE_DIST):
     return 0.0, -hive_dist
 
 
-def subsample_and_densify(x, y, target_pts=700):
+def subsample_and_densify(x, y, t=None, target_pts=700):
     n = len(x)
     if n < 2:
+        if t is not None:
+            return x, y, t
         return x, y
     dx = np.diff(x)
     dy = np.diff(y)
@@ -155,11 +164,16 @@ def subsample_and_densify(x, y, target_pts=700):
 
     total_dist = dist[-1]
     if total_dist <= 0:
+        if t is not None:
+            return x, y, t
         return x, y
 
     dist_interp = np.linspace(0.0, total_dist, max(n * 3, target_pts))
     x_interp = np.interp(dist_interp, dist, x)
     y_interp = np.interp(dist_interp, dist, y)
+    if t is not None:
+        t_interp = np.interp(dist_interp, dist, t)
+        return x_interp, y_interp, t_interp
 
     return x_interp, y_interp
 
@@ -206,7 +220,9 @@ def get_metadata(df, session_dir):
             with open(outcome_file, "r") as f:
                 txt = f.read().strip()
                 for line in txt.split("\n"):
-                    if "Outcome:" in line:
+                    if "Bee ID:" in line:
+                        bee_id = line.replace("Bee ID:", "").strip()
+                    elif "Outcome:" in line:
                         outcome = line.replace("Outcome:", "").strip()
                     elif "FixedOutcome:" in line:
                         outcome = line.replace("FixedOutcome:", "").strip()
@@ -227,7 +243,8 @@ def generate_full_trial_fixed(df, session_dir):
 
     x_all = df["x_mm"].values
     y_all = df["y_mm"].values
-    dists = df["distance_from_center_mm"].values
+    t_all = df["time_sec"].values if "time_sec" in df.columns else (df["frame"].values / 30.0 if "frame" in df.columns else np.arange(len(df)) / 30.0)
+    dists = df["distance_from_center_mm"].values if "distance_from_center_mm" in df.columns else np.hypot(x_all, y_all)
 
     outer_entries, outer_exits = find_crossings(dists, OUTER_R)
     inner_entries, inner_exits = find_crossings(dists, INNER_R)
@@ -259,30 +276,28 @@ def generate_full_trial_fixed(df, session_dir):
     if final_exit_idx <= first_outer_entry:
         final_exit_idx = len(df) - 1
 
-    # Extract full trial path
+    # Extract full trial path and physical timestamps
     full_x = x_all[first_outer_entry : final_exit_idx + 1]
     full_y = y_all[first_outer_entry : final_exit_idx + 1]
+    full_t = t_all[first_outer_entry : final_exit_idx + 1]
 
     if len(full_x) < 2:
         return
 
+    # Normalize relative time in seconds from trial start (entry = 0.0s)
+    t_start = full_t[0] if len(full_t) > 0 else 0.0
+    full_t_norm = full_t - t_start
+    max_t = full_t_norm[-1] if len(full_t_norm) > 0 and full_t_norm[-1] > 0 else 1.0
+
     # Truncate / Clip trajectory points strictly to inside arena boundary
-    full_x, full_y = clip_points_to_arena(full_x, full_y, max_r=OUTER_R)
+    full_x, full_y, full_t_norm = clip_points_to_arena(full_x, full_y, full_t_norm, max_r=OUTER_R)
 
     # Densify and smooth
-    full_x, full_y = subsample_and_densify(full_x, full_y, target_pts=800)
+    full_x, full_y, full_t_norm = subsample_and_densify(full_x, full_y, full_t_norm, target_pts=800)
     full_x, full_y = smooth(full_x, full_y, strength=17)
 
     # Re-clip after smoothing to ensure zero spillage
-    full_x, full_y = clip_points_to_arena(full_x, full_y, max_r=OUTER_R)
-
-    # Arc-length path progress from 0.0 to 1.0
-    dx = np.diff(full_x)
-    dy = np.diff(full_y)
-    cum_dist = np.cumsum(np.hypot(dx, dy))
-    cum_dist = np.insert(cum_dist, 0, 0.0)
-    total_len = cum_dist[-1]
-    path_progress = cum_dist / total_len if total_len > 0 else np.linspace(0, 1, len(full_x))
+    full_x, full_y, full_t_norm = clip_points_to_arena(full_x, full_y, full_t_norm, max_r=OUTER_R)
 
     fig, ax = plt.subplots(figsize=(9.5, 8), facecolor="white")
 
@@ -294,12 +309,12 @@ def generate_full_trial_fixed(df, session_dir):
     ax.plot(0, 0, "o", color=C_FEEDER, markersize=12, zorder=10)
     ax.text(0, -28, "Feeder", color=C_FEEDER, fontsize=11, fontweight="bold", ha="center", va="top", zorder=10)
 
-    # ── Path-Length Smooth 2-Color LineCollection ───────────────────────
+    # ── Time-based Smooth 2-Color LineCollection ───────────────────────
     points = np.column_stack([full_x, full_y]).reshape(-1, 1, 2)
     segments = np.concatenate([points[:-1], points[1:]], axis=1)
 
-    prog_segments = (path_progress[:-1] + path_progress[1:]) / 2.0
-    norm = plt.Normalize(0.0, 1.0)
+    t_segments = (full_t_norm[:-1] + full_t_norm[1:]) / 2.0
+    norm = plt.Normalize(0.0, max_t)
 
     lc = LineCollection(
         segments,
@@ -310,7 +325,7 @@ def generate_full_trial_fixed(df, session_dir):
         joinstyle="round",
         zorder=6
     )
-    lc.set_array(prog_segments)
+    lc.set_array(t_segments)
     ax.add_collection(lc)
 
     # ── Static Markers & Exits Display ──────────────────────────────────
@@ -369,8 +384,8 @@ def generate_full_trial_fixed(df, session_dir):
     legend_els = [
         Line2D([0], [0], marker="^", color="w", markerfacecolor=C_ENTRY, markersize=10, label="Entry (Outer)"),
         Line2D([0], [0], marker="D", color="w", markerfacecolor="#D32F2F", markersize=8, label="1st Inner Contact"),
-        Line2D([0], [0], color="#FFEE58", lw=3, label="Trajectory Start"),
-        Line2D([0], [0], color="#0D47A1", lw=3, label="Trajectory Finish"),
+        Line2D([0], [0], color="#FFEE58", lw=3, label="Trial Start (0.0s)"),
+        Line2D([0], [0], color="#0D47A1", lw=3, label=f"Trial Finish ({max_t:.1f}s)"),
         Line2D([0], [0], marker="D", color="w", markerfacecolor="#7B1FA2", markersize=8, label="1st Inner Exit"),
         Line2D([0], [0], marker="o", color="w", markerfacecolor=C_EXIT1, markersize=9, label="1st Outer Exit"),
     ]
@@ -393,13 +408,14 @@ def generate_full_trial_fixed(df, session_dir):
         labelspacing=0.5
     )
 
-    # Horizontal 2-Color Colorbar showing Path Progress
+    # Horizontal 2-Color Colorbar showing Time Progress in seconds
     sm = plt.cm.ScalarMappable(cmap=TWO_COLOR_CMAP, norm=norm)
     sm.set_array([])
     cax = fig.add_axes([0.22, 0.05, 0.48, 0.02])
-    cbar = fig.colorbar(sm, cax=cax, orientation="horizontal", ticks=[0.0, 0.25, 0.50, 0.75, 1.0])
-    cbar.ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
-    cbar.set_label("Trajectory Line Gradient: Start (Yellow) → 50% → Finish (Dark Blue)", fontsize=9.5, fontweight="bold")
+    ticks = np.linspace(0.0, max_t, 5)
+    cbar = fig.colorbar(sm, cax=cax, orientation="horizontal", ticks=ticks)
+    cbar.ax.set_xticklabels([f"{t_val:.1f}s" for t_val in ticks])
+    cbar.set_label(f"Time (seconds): Start (0.0s - Yellow) → Finish ({max_t:.1f}s - Dark Blue)", fontsize=9.5, fontweight="bold")
     cbar.ax.tick_params(labelsize=8)
 
     fig.subplots_adjust(left=0.05, right=0.72, top=0.92, bottom=0.12)
@@ -417,7 +433,8 @@ def generate_exit_only_fixed(df, session_dir):
 
     x_all = df["x_mm"].values
     y_all = df["y_mm"].values
-    dists = df["distance_from_center_mm"].values
+    t_all = df["time_sec"].values if "time_sec" in df.columns else (df["frame"].values / 30.0 if "frame" in df.columns else np.arange(len(df)) / 30.0)
+    dists = df["distance_from_center_mm"].values if "distance_from_center_mm" in df.columns else np.hypot(x_all, y_all)
 
     outer_entries, outer_exits = find_crossings(dists, OUTER_R)
     inner_entries, inner_exits = find_crossings(dists, INNER_R)
@@ -441,21 +458,19 @@ def generate_exit_only_fixed(df, session_dir):
 
     out_x = x_all[feeder_idx : outbound_end + 1]
     out_y = y_all[feeder_idx : outbound_end + 1]
+    out_t = t_all[feeder_idx : outbound_end + 1]
 
     if len(out_x) < 2:
         return
 
-    out_x, out_y = clip_points_to_arena(out_x, out_y, max_r=OUTER_R)
-    out_x, out_y = subsample_and_densify(out_x, out_y, target_pts=700)
-    out_x, out_y = smooth(out_x, out_y, strength=15)
-    out_x, out_y = clip_points_to_arena(out_x, out_y, max_r=OUTER_R)
+    t_start = out_t[0] if len(out_t) > 0 else 0.0
+    out_t_norm = out_t - t_start
+    max_t = out_t_norm[-1] if len(out_t_norm) > 0 and out_t_norm[-1] > 0 else 1.0
 
-    dx = np.diff(out_x)
-    dy = np.diff(out_y)
-    cum_dist = np.cumsum(np.hypot(dx, dy))
-    cum_dist = np.insert(cum_dist, 0, 0.0)
-    total_len = cum_dist[-1]
-    path_progress = cum_dist / total_len if total_len > 0 else np.linspace(0, 1, len(out_x))
+    out_x, out_y, out_t_norm = clip_points_to_arena(out_x, out_y, out_t_norm, max_r=OUTER_R)
+    out_x, out_y, out_t_norm = subsample_and_densify(out_x, out_y, out_t_norm, target_pts=700)
+    out_x, out_y = smooth(out_x, out_y, strength=15)
+    out_x, out_y, out_t_norm = clip_points_to_arena(out_x, out_y, out_t_norm, max_r=OUTER_R)
 
     fig, ax = plt.subplots(figsize=(9.5, 8), facecolor="white")
 
@@ -468,8 +483,8 @@ def generate_exit_only_fixed(df, session_dir):
     points = np.column_stack([out_x, out_y]).reshape(-1, 1, 2)
     segments = np.concatenate([points[:-1], points[1:]], axis=1)
 
-    prog_segments = (path_progress[:-1] + path_progress[1:]) / 2.0
-    norm = plt.Normalize(0.0, 1.0)
+    t_segments = (out_t_norm[:-1] + out_t_norm[1:]) / 2.0
+    norm = plt.Normalize(0.0, max_t)
 
     lc = LineCollection(
         segments,
@@ -480,7 +495,7 @@ def generate_exit_only_fixed(df, session_dir):
         joinstyle="round",
         zorder=6
     )
-    lc.set_array(prog_segments)
+    lc.set_array(t_segments)
     ax.add_collection(lc)
 
     if first_inner_exit is not None:
@@ -521,8 +536,8 @@ def generate_exit_only_fixed(df, session_dir):
     ax.axis("off")
 
     legend_els = [
-        Line2D([0], [0], color="#FFEE58", lw=3, label="Feeder Exit Start"),
-        Line2D([0], [0], color="#0D47A1", lw=3, label="Arena Exit Finish"),
+        Line2D([0], [0], color="#FFEE58", lw=3, label="Feeder Exit Start (0.0s)"),
+        Line2D([0], [0], color="#0D47A1", lw=3, label=f"Arena Exit Finish ({max_t:.1f}s)"),
         Line2D([0], [0], marker="D", color="w", markerfacecolor="#7B1FA2", markersize=8, label="1st Inner Exit"),
         Line2D([0], [0], marker="o", color="w", markerfacecolor=C_EXIT1, markersize=9, label="1st Outer Exit"),
     ]
@@ -548,9 +563,10 @@ def generate_exit_only_fixed(df, session_dir):
     sm = plt.cm.ScalarMappable(cmap=TWO_COLOR_CMAP, norm=norm)
     sm.set_array([])
     cax = fig.add_axes([0.22, 0.05, 0.48, 0.02])
-    cbar = fig.colorbar(sm, cax=cax, orientation="horizontal", ticks=[0.0, 0.25, 0.50, 0.75, 1.0])
-    cbar.ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
-    cbar.set_label("Exit Line Gradient: Feeder Exit (Yellow) → 50% → Finish (Dark Blue)", fontsize=9.5, fontweight="bold")
+    ticks = np.linspace(0.0, max_t, 5)
+    cbar = fig.colorbar(sm, cax=cax, orientation="horizontal", ticks=ticks)
+    cbar.ax.set_xticklabels([f"{t_val:.1f}s" for t_val in ticks])
+    cbar.set_label(f"Exit Path Time (seconds): Feeder Departure (0.0s - Yellow) → Finish ({max_t:.1f}s - Dark Blue)", fontsize=9.5, fontweight="bold")
     cbar.ax.tick_params(labelsize=8)
 
     fig.subplots_adjust(left=0.05, right=0.72, top=0.92, bottom=0.12)

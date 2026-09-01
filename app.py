@@ -623,37 +623,61 @@ def plot_trajectory(df, entry_frame=None, exit_frame=None, title="Bee Trajectory
     ax.text(0.03, 0.03, textstr, transform=ax.transAxes, fontsize=10,
             fontweight='bold', verticalalignment='bottom', bbox=props)
             
-    ax.legend(loc="upper right", fontsize=9, framealpha=1, facecolor="white", edgecolor="#cccccc")
+    ax.legend(bbox_to_anchor=(1.04, 1.0), loc="upper left", fontsize=9, framealpha=1, facecolor="white", edgecolor="#cccccc")
     return fig
 
 
-def generate_tracked_video(video_path, coords, entry_frame, exit_frame, output_path, circle_center, circle_radius):
+def generate_tracked_video(video_path, coords, entry_frame, exit_frame, output_path, circle_center, circle_radius, progress_callback=None):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return False
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-
-    coords_sorted = sorted(coords, key=lambda c: c["frame"]) if coords else []
+    coords_sorted = sorted(coords, key=lambda c: int(c["frame"])) if coords else []
 
     if coords_sorted:
         coords_min = int(coords_sorted[0]["frame"])
         coords_max = int(coords_sorted[-1]["frame"])
     else:
-        coords_min, coords_max = 0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) - 1
+        coords_min, coords_max = 0, total_frames - 1
 
     entry_f = int(entry_frame) if entry_frame is not None else coords_min
-    exit_f = int(exit_frame) if exit_frame is not None else coords_max
+    requested_exit = int(exit_frame) if exit_frame is not None else coords_max
+    exit_f = max(coords_max, requested_exit)
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     entry_f = max(0, min(entry_f, total_frames - 1))
     exit_f = max(0, min(exit_f, total_frames - 1))
 
+    temp_output = output_path + ".tmp.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(temp_output, fourcc, fps, (width, height))
+
+    tagged_markers = []
+    for c in coords_sorted:
+        tag = c.get("tag_type")
+        if tag in ("entry", "exit", "help", "analysis_end"):
+            try:
+                px = int(float(c.get("x_pixel", 0)))
+                py = int(float(c.get("y_pixel", 0)))
+                tagged_markers.append({
+                    "frame": int(c["frame"]),
+                    "tag": tag,
+                    "x": px,
+                    "y": py
+                })
+            except Exception:
+                pass
+
+    coord_frames = [int(c["frame"]) for c in coords_sorted]
+    num_coords = len(coords_sorted)
+    poly_pts = []
+    coord_idx = 0
+
     cap.set(cv2.CAP_PROP_POS_FRAMES, entry_f)
+    total_to_process = max(1, exit_f - entry_f + 1)
 
     for f_idx in range(entry_f, exit_f + 1):
         ret, frame = cap.read()
@@ -662,32 +686,76 @@ def generate_tracked_video(video_path, coords, entry_frame, exit_frame, output_p
 
         vis = draw_calibration_overlay(frame, circle_center[0], circle_center[1], circle_radius)
 
-        coords_up_to_frame = [c for c in coords_sorted if c["frame"] <= f_idx]
-        if len(coords_up_to_frame) > 1:
-            pts = np.array([[int(c["x_pixel"]), int(c["y_pixel"])] for c in coords_up_to_frame], np.int32).reshape((-1, 1, 2))
+        # Advance coordinate pointer up to current frame (O(1) amortized)
+        while coord_idx < num_coords and coord_frames[coord_idx] <= f_idx:
+            c = coords_sorted[coord_idx]
+            try:
+                poly_pts.append([int(float(c["x_pixel"])), int(float(c["y_pixel"]))])
+            except Exception:
+                pass
+            coord_idx += 1
+
+        # Draw continuous polyline trajectory
+        if len(poly_pts) > 1:
+            pts = np.array(poly_pts, np.int32).reshape((-1, 1, 2))
             cv2.polylines(vis, [pts], False, (0, 200, 255), 2)
 
-        for c in coords_up_to_frame:
-            if c.get("tag_type") == "entry":
-                cv2.drawMarker(vis, (int(c["x_pixel"]), int(c["y_pixel"])), (42, 157, 143), cv2.MARKER_TILTED_CROSS, 18, 2)
-                cv2.putText(vis, "ENTRY", (int(c["x_pixel"]) + 10, int(c["y_pixel"]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (42, 157, 143), 2)
-            elif c.get("tag_type") == "exit":
-                cv2.drawMarker(vis, (int(c["x_pixel"]), int(c["y_pixel"])), (230, 57, 70), cv2.MARKER_TILTED_CROSS, 18, 2)
-                cv2.putText(vis, "EXIT", (int(c["x_pixel"]) + 10, int(c["y_pixel"]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (230, 57, 70), 2)
+        # Draw tagged event markers
+        for m in tagged_markers:
+            if m["frame"] <= f_idx:
+                px, py = m["x"], m["y"]
+                tag = m["tag"]
+                if tag == "entry":
+                    cv2.drawMarker(vis, (px, py), (42, 157, 143), cv2.MARKER_TILTED_CROSS, 18, 2)
+                    cv2.putText(vis, "ENTRY", (px + 10, py - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (42, 157, 143), 2)
+                elif tag == "exit":
+                    cv2.drawMarker(vis, (px, py), (230, 57, 70), cv2.MARKER_TILTED_CROSS, 18, 2)
+                    cv2.putText(vis, "EXIT", (px + 10, py - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (230, 57, 70), 2)
+                elif tag == "help":
+                    cv2.drawMarker(vis, (px, py), (0, 180, 255), cv2.MARKER_CROSS, 16, 2)
+                    cv2.putText(vis, "HELP", (px + 10, py - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 180, 255), 2)
+                elif tag == "analysis_end":
+                    cv2.drawMarker(vis, (px, py), (255, 140, 0), cv2.MARKER_TILTED_CROSS, 18, 2)
+                    cv2.putText(vis, "END", (px + 10, py - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 140, 0), 2)
 
-        coord_at_cur = next((c for c in coords_up_to_frame if c["frame"] == f_idx), None)
-        if coord_at_cur:
-            cx, cy = int(coord_at_cur["x_pixel"]), int(coord_at_cur["y_pixel"])
-            status = coord_at_cur.get("status", "ok")
+        # Interpolate current bee position cursor
+        if coord_idx > 0:
+            c_prev = coords_sorted[coord_idx - 1]
+            if coord_idx < num_coords:
+                c_next = coords_sorted[coord_idx]
+                f_prev = int(c_prev["frame"])
+                f_next = int(c_next["frame"])
+                if f_next > f_prev:
+                    alpha = (f_idx - f_prev) / float(f_next - f_prev)
+                    cx = int(float(c_prev["x_pixel"]) + alpha * (float(c_next["x_pixel"]) - float(c_prev["x_pixel"])))
+                    cy = int(float(c_prev["y_pixel"]) + alpha * (float(c_next["y_pixel"]) - float(c_prev["y_pixel"])))
+                else:
+                    cx, cy = int(float(c_prev["x_pixel"])), int(float(c_prev["y_pixel"]))
+            else:
+                cx, cy = int(float(c_prev["x_pixel"])), int(float(c_prev["y_pixel"]))
+
+            status = c_prev.get("status", "ok")
             col = (0, 255, 0) if status in ("ok", "idle") else (0, 180, 255) if status == "manual" else (0, 80, 255)
             cv2.circle(vis, (cx, cy), 8, col, -1)
             cv2.circle(vis, (cx, cy), 14, col, 2)
 
         out.write(vis)
 
+        if progress_callback and (f_idx - entry_f) % 30 == 0:
+            prog = min(1.0, (f_idx - entry_f) / total_to_process)
+            progress_callback(prog)
+
     cap.release()
     out.release()
-    return True
+
+    if os.path.exists(temp_output):
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        os.rename(temp_output, output_path)
+        if progress_callback:
+            progress_callback(1.0)
+        return True
+    return False
 
 
 def fmt_time(frame, fps):
@@ -819,6 +887,7 @@ DEFAULTS = {
     "track_stride": 1,
     "bee_went_back": "unknown",
     "processed_df": None,
+    "results_dir": "results",
 }
 
 SLOT_KEYS = [
@@ -843,6 +912,7 @@ SLOT_KEYS = [
     "tracking_lost",
     "bee_went_back",
     "processed_df",
+    "results_dir",
     "player_frame",
     "last_player_frame",
     "timeline_slider",
@@ -874,6 +944,7 @@ if "slots" not in st.session_state:
             "tracking_lost": False,
             "bee_went_back": "unknown",
             "processed_df": None,
+            "results_dir": "results",
             "player_frame": 0,
             "last_player_frame": 0,
             "timeline_slider": 0,
@@ -1030,6 +1101,20 @@ if st.session_state.tab == "load":
         st.session_state.video_path = None
         st.session_state.video_name = ""
 
+    st.markdown("---")
+    st.markdown(f"#### 💾 Results Save Location (Slot {st.session_state.active_slot + 1})")
+    current_results_dir = st.session_state.results_dir if st.session_state.results_dir else "results"
+    results_path_input = st.text_input(
+        "Directory where tracking results, CSVs, preview videos & plots will be saved:",
+        value=current_results_dir,
+        placeholder="e.g. results or /path/to/custom_results",
+        key=f"res_dir_input_{st.session_state.active_slot}",
+        help="Enter the folder path where tracking data, CSVs, preview videos, and plots will be saved."
+    )
+    if results_path_input.strip() and results_path_input.strip() != st.session_state.results_dir:
+        st.session_state.results_dir = results_path_input.strip()
+        sync_flat_to_active_slot()
+
     if st.button("Refresh file list", key=f"ref_{st.session_state.active_slot}"):
         st.session_state.local_videos = []
         st.session_state.selected_video_index = None
@@ -1044,11 +1129,13 @@ if st.session_state.tab == "load":
         else:
             st.warning("Specified path is not a valid folder or file location.")
 
+    active_res_dir = st.session_state.results_dir if st.session_state.results_dir else "results"
+
     if st.session_state.local_videos:
         file_options = []
         for video in st.session_state.local_videos:
             video_dir_name = os.path.splitext(video["name"])[0].replace(" ", "_")
-            export_dir = os.path.join("results", video_dir_name)
+            export_dir = os.path.join(active_res_dir, video_dir_name)
             tracked = os.path.exists(export_dir) and any(f.startswith("bee_track_") and f.endswith(".csv") for f in os.listdir(export_dir))
             label = f"{video['name']} {'✅ tracked' if tracked else '• new'}"
             file_options.append(label)
@@ -1078,7 +1165,7 @@ if st.session_state.tab == "load":
             st.image(cv2.cvtColor(f0, cv2.COLOR_BGR2RGB), use_container_width=True, caption="Initial Frame Preview")
             
         video_dir_name = os.path.splitext(st.session_state.video_name)[0].replace(" ", "_")
-        export_dir = os.path.join("results", video_dir_name)
+        export_dir = os.path.join(active_res_dir, video_dir_name)
         existing_csv = None
         if os.path.exists(export_dir):
             for f in os.listdir(export_dir):
@@ -1087,7 +1174,7 @@ if st.session_state.tab == "load":
                     break
 
         if existing_csv:
-            st.info(f"Existing tracking results found in {export_dir}.")
+            st.info(f"Existing tracking results found in `{export_dir}`.")
             if st.button("Load existing results into slot", key=f"load_res_{st.session_state.active_slot}"):
                 try:
                     df_existing = pd.read_csv(existing_csv)
@@ -1106,6 +1193,8 @@ if st.session_state.tab == "load":
                     st.rerun()
                 except Exception as e:
                     st.error(f"Failed to load existing results: {e}")
+        else:
+            st.caption(f"📁 Session results will be saved under: `{os.path.abspath(export_dir)}`")
 
         if st.button("Next: Calibrate arena →", type="primary", key="load_done_btn"):
             sync_flat_to_active_slot()
@@ -1951,29 +2040,76 @@ elif st.session_state.tab == "analysis":
         st.info("⚪ Outcome: Unknown (unspecified outcome).")
 
     # 5. Export Files & Create ZIP
+    res_base_dir = st.session_state.results_dir if st.session_state.results_dir else "results"
     video_dir_name = os.path.splitext(video_name)[0].replace(" ", "_")
-    export_dir = os.path.join("results", video_dir_name)
+    export_dir = os.path.join(res_base_dir, video_dir_name)
     os.makedirs(export_dir, exist_ok=True)
 
+    st.markdown("### 💾 Export & Results Location")
+    c_res_dir, c_res_info = st.columns([3, 2])
+    with c_res_dir:
+        new_res_dir = st.text_input(
+            "Save Results To Folder:",
+            value=res_base_dir,
+            key=f"tab4_res_dir_input_{st.session_state.active_slot}",
+            help="Folder where all tracking outputs, videos, and plots are written."
+        )
+        if new_res_dir.strip() and new_res_dir.strip() != st.session_state.results_dir:
+            st.session_state.results_dir = new_res_dir.strip()
+            sync_flat_to_active_slot()
+            st.rerun()
+    with c_res_info:
+        st.info(f"📁 **Save destination:**\n`{os.path.abspath(export_dir)}`")
+
     video_export_path = os.path.join(export_dir, f"tracked_preview_{os.path.splitext(video_name)[0]}.mp4")
-    if not os.path.exists(video_export_path):
-        with st.spinner("Generating tracked preview video (this may take a moment)..."):
-            meta = video_meta(st.session_state.video_path)
-            max_f = meta["frames"] - 1
-            end_f = get_tracking_end_frame(
-                exit_frame=st.session_state.exit_frame,
-                max_frame=max_f,
-                analysis_end_frame=st.session_state.analysis_end_frame
-            )
-            generate_tracked_video(
-                st.session_state.video_path,
-                st.session_state.track_coords,
-                st.session_state.entry_frame,
-                end_f,
-                video_export_path,
-                st.session_state.circle_center,
-                st.session_state.circle_radius
-            )
+    
+    col_vid_btn, col_vid_stat = st.columns([2, 3])
+    with col_vid_btn:
+        regen_video = st.button("🔄 Re-generate Tracked Preview Video", help="Force regenerate the preview video across all tracked frames", key=f"btn_regen_vid_{st.session_state.active_slot}")
+
+    # Gather full tracking coordinates from memory or loaded session dataframe or disk CSV
+    all_coords = st.session_state.track_coords
+    if (not all_coords or len(all_coords) < 5) and st.session_state.processed_df is not None:
+        all_coords = st.session_state.processed_df.to_dict("records")
+    elif (not all_coords or len(all_coords) < 5):
+        csv_check_path = os.path.join(export_dir, f"bee_track_{os.path.splitext(video_name)[0]}.csv")
+        if os.path.exists(csv_check_path):
+            try:
+                all_coords = pd.read_csv(csv_check_path).to_dict("records")
+            except Exception:
+                pass
+
+    if regen_video or not os.path.exists(video_export_path) or os.path.getsize(video_export_path) < 1000:
+        meta = video_meta(st.session_state.video_path)
+        max_f = meta["frames"] - 1
+        end_f = get_tracking_end_frame(
+            exit_frame=st.session_state.exit_frame,
+            max_frame=max_f,
+            analysis_end_frame=st.session_state.analysis_end_frame
+        )
+        coords_max = max([int(c["frame"]) for c in all_coords]) if all_coords else end_f
+        final_end_f = max(coords_max, end_f)
+
+        prog_bar = st.progress(0.0, text="Generating tracked preview video...")
+        
+        def update_prog(p):
+            prog_bar.progress(p, text=f"Rendering preview video: {int(p * 100)}% complete...")
+
+        success = generate_tracked_video(
+            st.session_state.video_path,
+            all_coords,
+            st.session_state.entry_frame,
+            final_end_f,
+            video_export_path,
+            st.session_state.circle_center,
+            st.session_state.circle_radius,
+            progress_callback=update_prog
+        )
+        prog_bar.empty()
+        if success:
+            st.success(f"✅ Tracked preview video re-generated across {final_end_f + 1} frames!")
+        else:
+            st.warning("Could not generate preview video for this stream.")
 
     csv_export_path = os.path.join(export_dir, f"bee_track_{os.path.splitext(video_name)[0]}.csv")
     png_export_path = os.path.join(export_dir, f"trajectory_{os.path.splitext(video_name)[0]}.png")

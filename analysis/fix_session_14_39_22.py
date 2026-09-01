@@ -138,19 +138,19 @@ def fix_session_14_39_22():
     full_x = x_all[0 : final_exit_idx + 1]
     full_y = y_all[0 : final_exit_idx + 1]
 
+    t_all = df["time_sec"].values if "time_sec" in df.columns else (df["frame"].values / 30.0 if "frame" in df.columns else np.arange(len(df)) / 30.0)
+    full_t = t_all[0 : final_exit_idx + 1]
+    t_start = full_t[0] if len(full_t) > 0 else 0.0
+    full_t_norm = full_t - t_start
+    max_t = full_t_norm[-1] if len(full_t_norm) > 0 and full_t_norm[-1] > 0 else 1.0
+
     # Clip strictly inside arena
     full_x, full_y = clip_points_to_arena(full_x, full_y, max_r=OUTER_R)
     full_x, full_y = subsample_and_densify(full_x, full_y, target_pts=850)
     full_x, full_y = smooth(full_x, full_y, strength=17)
     full_x, full_y = clip_points_to_arena(full_x, full_y, max_r=OUTER_R)
 
-    # Arc-length path progress
-    dx = np.diff(full_x)
-    dy = np.diff(full_y)
-    cum_dist = np.cumsum(np.hypot(dx, dy))
-    cum_dist = np.insert(cum_dist, 0, 0.0)
-    total_len = cum_dist[-1]
-    path_progress = cum_dist / total_len if total_len > 0 else np.linspace(0, 1, len(full_x))
+    t_interp = np.linspace(0.0, max_t, len(full_x))
 
     fig, ax = plt.subplots(figsize=(9.5, 8), facecolor="white")
 
@@ -165,8 +165,8 @@ def fix_session_14_39_22():
     # LineCollection gradient
     points = np.column_stack([full_x, full_y]).reshape(-1, 1, 2)
     segments = np.concatenate([points[:-1], points[1:]], axis=1)
-    prog_segments = (path_progress[:-1] + path_progress[1:]) / 2.0
-    norm = plt.Normalize(0.0, 1.0)
+    prog_segments = (t_interp[:-1] + t_interp[1:]) / 2.0
+    norm = plt.Normalize(0.0, max_t)
 
     lc = LineCollection(
         segments,
@@ -224,9 +224,9 @@ def fix_session_14_39_22():
 
     legend_els = [
         Line2D([0], [0], marker="^", color="w", markerfacecolor=C_ENTRY, markersize=10, label="Entry Point"),
-        Line2D([0], [0], color="#FFEE58", lw=3, label="Trajectory Start (Yellow)"),
+        Line2D([0], [0], color="#FFEE58", lw=3, label="Trial Start (0.0s)"),
         Line2D([0], [0], color=C_EXIT1, lw=3, label="1st Exit Stage (Yellow-Green)"),
-        Line2D([0], [0], color=C_EXIT2, lw=3, label="Final Exit Finish (Dark Blue)"),
+        Line2D([0], [0], color=C_EXIT2, lw=3, label=f"Final Exit Finish ({max_t:.1f}s)"),
         Line2D([0], [0], marker="o", color="w", markerfacecolor=C_EXIT1, markeredgecolor="#333333", markersize=9, label="① 1st Exit (Row 827)"),
         Line2D([0], [0], marker="o", color="w", markerfacecolor=C_EXIT2, markeredgecolor="#ffffff", markersize=9, label="② Final Exit (Row 915)"),
         Line2D([0], [0], marker="o", color="w", markerfacecolor=C_FEEDER, markersize=9, label="Feeder (0,0)"),
@@ -248,9 +248,10 @@ def fix_session_14_39_22():
     sm = plt.cm.ScalarMappable(cmap=TWO_COLOR_CMAP, norm=norm)
     sm.set_array([])
     cax = fig.add_axes([0.22, 0.05, 0.48, 0.02])
-    cbar = fig.colorbar(sm, cax=cax, orientation="horizontal", ticks=[0.0, 0.25, 0.50, 0.75, 1.0])
-    cbar.ax.set_xticklabels(["0% (Feeder)", "25% (1st Exit)", "50%", "75%", "100% (Final Exit)"])
-    cbar.set_label("Trajectory Line Gradient: Start (Yellow) → 1st Exit (Yellow-Green) → Final Exit (Dark Blue)", fontsize=9.5, fontweight="bold")
+    ticks = np.linspace(0.0, max_t, 5)
+    cbar = fig.colorbar(sm, cax=cax, orientation="horizontal", ticks=ticks)
+    cbar.ax.set_xticklabels([f"{t_val:.1f}s" for t_val in ticks])
+    cbar.set_label(f"Time (seconds): Start (0.0s - Yellow) → 1st Exit → Final Exit ({max_t:.1f}s - Dark Blue)", fontsize=9.5, fontweight="bold")
     cbar.ax.tick_params(labelsize=8)
 
     fig.subplots_adjust(left=0.05, right=0.72, top=0.92, bottom=0.12)

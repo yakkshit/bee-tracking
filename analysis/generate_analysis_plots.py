@@ -69,7 +69,34 @@ def extract_bee_id(session_dir, df=None):
 
     return "unknown"
 
-    return "Unknown"
+
+def get_hive_position(df, outer_r=OUTER_R, hive_dist=HIVE_DIST):
+    if df is None or len(df) == 0:
+        return 0.0, -hive_dist
+    x_all = df["x_mm"].values
+    y_all = df["y_mm"].values
+    dists = df["distance_from_center_mm"].values if "distance_from_center_mm" in df.columns else np.hypot(x_all, y_all)
+    if "tag_type" in df.columns:
+        entry_rows = df[df["tag_type"] == "entry"]
+        if not entry_rows.empty:
+            xe = float(entry_rows.iloc[0]["x_mm"])
+            ye = float(entry_rows.iloc[0]["y_mm"])
+            d = np.hypot(xe, ye)
+            if d >= 1.0:
+                return xe * hive_dist / d, ye * hive_dist / d
+    outer_entries = [i for i in range(1, len(dists)) if dists[i-1] > outer_r and dists[i] <= outer_r]
+    if outer_entries:
+        idx = outer_entries[0]
+        xe, ye = x_all[idx], y_all[idx]
+        d = np.hypot(xe, ye)
+        if d >= 1.0:
+            return xe * hive_dist / d, ye * hive_dist / d
+    if len(x_all) > 0:
+        xe, ye = x_all[0], y_all[0]
+        d = np.hypot(xe, ye)
+        if d >= 1.0:
+            return xe * hive_dist / d, ye * hive_dist / d
+    return 0.0, -hive_dist
 
 
 def smooth_and_interpolate(x, y, t, target_pts=800):
@@ -161,16 +188,12 @@ def generate_figure(df, session_dir):
     ax.add_collection(lc)
 
     # Hive marker outside outer boundary
-    tag_type = str(df.iloc[0].get("tag_type", "")).strip().lower()
-    orient = str(df.iloc[0].get("orientation", "LR")).strip().upper()
-    if tag_type == "auto":
-        hive_x, hive_y = 0.0, -HIVE_DIST
-    else:
-        hive_angle = np.pi / 2 if orient == "TB" else 0.0
-        hive_x = HIVE_DIST * np.cos(hive_angle)
-        hive_y = HIVE_DIST * np.sin(hive_angle)
+    hive_x, hive_y = get_hive_position(df)
     ax.plot(hive_x, hive_y, "o", color="#333333", markersize=9, markeredgecolor="#111111", markeredgewidth=1.2, zorder=10)
-    ax.annotate("Hive", (hive_x, hive_y), textcoords="offset points", xytext=(10, 0), fontsize=9, fontweight="bold", color="#333333", va="center", zorder=11)
+    ax.annotate("Hive", (hive_x, hive_y), textcoords="offset points", 
+                xytext=(10, 0) if abs(hive_x) > 200 else (0, -20), 
+                fontsize=9, fontweight="bold", color="#333333", 
+                va="center", ha="left" if hive_x >= 0 else "right", zorder=11)
 
     # Feeder center marker
     ax.plot(0, 0, "o", color="#ffa000", markersize=8, zorder=10)

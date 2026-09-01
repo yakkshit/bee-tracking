@@ -55,6 +55,35 @@ def extract_bee_id(folder_path, df=None):
     return "unknown"
 
 
+def get_hive_position(df, outer_r=420.0, hive_dist=450.0):
+    if df is None or len(df) == 0:
+        return 0.0, -hive_dist
+    x_all = df["x_mm"].values
+    y_all = df["y_mm"].values
+    dists = df["distance_from_center_mm"].values if "distance_from_center_mm" in df.columns else np.hypot(x_all, y_all)
+    if "tag_type" in df.columns:
+        entry_rows = df[df["tag_type"] == "entry"]
+        if not entry_rows.empty:
+            xe = float(entry_rows.iloc[0]["x_mm"])
+            ye = float(entry_rows.iloc[0]["y_mm"])
+            d = np.hypot(xe, ye)
+            if d >= 1.0:
+                return xe * hive_dist / d, ye * hive_dist / d
+    outer_entries = [i for i in range(1, len(dists)) if dists[i-1] > outer_r and dists[i] <= outer_r]
+    if outer_entries:
+        idx = outer_entries[0]
+        xe, ye = x_all[idx], y_all[idx]
+        d = np.hypot(xe, ye)
+        if d >= 1.0:
+            return xe * hive_dist / d, ye * hive_dist / d
+    if len(x_all) > 0:
+        xe, ye = x_all[0], y_all[0]
+        d = np.hypot(xe, ye)
+        if d >= 1.0:
+            return xe * hive_dist / d, ye * hive_dist / d
+    return 0.0, -hive_dist
+
+
 def process_single_trial(folder_path, frame_gap_threshold=40, spatial_jump_threshold=80.0, fps=60):
     folder_name = os.path.basename(folder_path)
     print(f"\nProcessing folder: {folder_name}")
@@ -231,12 +260,13 @@ def process_single_trial(folder_path, frame_gap_threshold=40, spatial_jump_thres
         'outer_exit':  {'type': 'outer_exit',  'pos': proj_point(x_smooth[outer_exit_idx], y_smooth[outer_exit_idx], r_outer)},
     }
 
-    # HIVE LOCATION: Fixed physical entrance at bottom center (0, -450 mm)
-    hive_pos = (0.0, -450.0)
-
     # Angles setup
     entry_px, entry_py = first_events['outer_entry']['pos']
     exit_px, exit_py = first_events['outer_exit']['pos']
+
+    # DYNAMIC HIVE LOCATION: matching get_hive_position exactly
+    hive_x, hive_y = get_hive_position(df, outer_r=r_outer, hive_dist=450.0)
+    hive_pos = (hive_x, hive_y)
 
     # 7. Crop Outside Arena
     inside_arena_mask = r_all <= r_outer
@@ -263,9 +293,12 @@ def process_single_trial(folder_path, frame_gap_threshold=40, spatial_jump_thres
     ax.add_patch(plt.Circle((0, 0), r_outer, fill=False, color='black', lw=2.2, zorder=2))
     ax.add_patch(plt.Circle((0, 0), r_inner, fill=False, color='gray', linestyle='--', lw=1.5, zorder=2))
 
-    # PLOT FIXED HIVE LOCATION AT BOTTOM (0, -450)
+    # PLOT DYNAMIC HIVE LOCATION
     ax.scatter(hive_pos[0], hive_pos[1], color='black', marker='o', s=180, zorder=9, edgecolors='white', linewidth=1.0)
-    ax.text(hive_pos[0], hive_pos[1] - 25, 'Hive', fontsize=11, fontweight='bold', color='black', va='top', ha='center', zorder=9)
+    ax.annotate('Hive', (hive_pos[0], hive_pos[1]), textcoords="offset points",
+                xytext=(15, 16) if hive_pos[0] > 200 else (-15, 16) if hive_pos[0] < -200 else (0, -25),
+                fontsize=11, fontweight='bold', color='black',
+                va='center', ha='left' if hive_pos[0] >= 0 else 'right', zorder=9)
 
     # Draw Raw Segments
     if len(raw_indices) > 0:
@@ -335,7 +368,7 @@ def process_single_trial(folder_path, frame_gap_threshold=40, spatial_jump_thres
     ax.set_aspect('equal')
     ax.axis('off')
     ax.set_title(parse_metadata_from_foldername(folder_name), fontsize=12, fontweight='bold', pad=15)
-    ax.legend(handles=legend_elements, loc='upper left', frameon=True, fontsize=8.5)
+    ax.legend(handles=legend_elements, bbox_to_anchor=(1.04, 1.0), loc='upper left', frameon=True, fontsize=8.5)
 
     # Colorbar
     cbar_ax = fig.add_axes([0.2, 0.05, 0.6, 0.02])

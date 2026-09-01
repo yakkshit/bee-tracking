@@ -337,7 +337,7 @@ def generate_full_trajectory_smooth(df, session_dir):
         Line2D([0], [0], marker="o", color="w", markerfacecolor=C_EXIT, markersize=9, label="Exit (Outer)"),
         Line2D([0], [0], marker="o", color="w", markerfacecolor=C_FEEDER, markersize=9, label="Feeder (0,0)"),
     ]
-    ax.legend(handles=legend_els, loc="upper right", frameon=True, facecolor="white", edgecolor="#d0d0d0", fontsize=8.5, borderpad=0.6, labelspacing=0.4)
+    ax.legend(handles=legend_els, bbox_to_anchor=(1.04, 1.0), loc="upper left", frameon=True, facecolor="white", edgecolor="#d0d0d0", fontsize=8.5, borderpad=0.6, labelspacing=0.4)
 
     # Horizontal 2-Color Colorbar showing Path Progress (0% to 100%)
     sm = plt.cm.ScalarMappable(cmap=TWO_COLOR_CMAP, norm=norm)
@@ -464,7 +464,7 @@ def generate_exit_trajectory_smooth(df, session_dir):
         Line2D([0], [0], marker="o", color="w", markerfacecolor=C_FEEDER, markersize=9, label="Feeder (0,0)"),
         Line2D([0], [0], marker="o", color="w", markerfacecolor="#333333", markeredgecolor="#111111", markersize=9, label="Hive"),
     ]
-    ax.legend(handles=legend_els, loc="upper right", frameon=True, facecolor="white", edgecolor="#d0d0d0", fontsize=8.5, borderpad=0.6, labelspacing=0.4)
+    ax.legend(handles=legend_els, bbox_to_anchor=(1.04, 1.0), loc="upper left", frameon=True, facecolor="white", edgecolor="#d0d0d0", fontsize=8.5, borderpad=0.6, labelspacing=0.4)
 
     sm = plt.cm.ScalarMappable(cmap=TWO_COLOR_CMAP, norm=norm)
     sm.set_array([])
