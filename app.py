@@ -52,7 +52,7 @@ from matplotlib.collections import LineCollection
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
-from tracking_logic import get_tracking_end_frame
+from tracking_logic import get_tracking_end_frame, get_yolo_detector, get_online_trainer
 
 # ---------------------------------------------------------------------------
 # Page configuration & UI style rules
@@ -423,6 +423,23 @@ def track_single_frame(frame, state, settings, slot_idx=0):
                 last_bbox = clamp_bbox((spot[0] - bw / 2, spot[1] - bh / 2, bw, bh), frame.shape)
                 confidence, method = 0.4, "arena_scan"
 
+    # YOLO Detector Fallback & Re-acquisition (Continuously fine-tuned for high accuracy)
+    if detected is None:
+        yolo_det = get_yolo_detector()
+        yolo_res = yolo_det.detect_bee(frame, roi=last_bbox if last_bbox else None, conf_threshold=0.25)
+        if yolo_res is None and last_center is not None:
+            win = 320 if near_feeder else 200
+            roi = (last_center[0] - win / 2, last_center[1] - win / 2, win, win)
+            yolo_res = yolo_det.detect_bee(frame, roi=roi, conf_threshold=0.20)
+
+        if yolo_res:
+            ycx, ycy, yw, yh, yconf = yolo_res
+            _, _, d = pixel_to_mm(ycx, ycy, (xc, yc), scale)
+            if d <= OUTER_RADIUS_MM + 45:
+                detected = (ycx, ycy)
+                last_bbox = clamp_bbox((ycx - yw / 2, ycy - yh / 2, yw, yh), frame.shape)
+                confidence, method = yconf, "yolo"
+
     if detected is None:
         return None, None, "lost", state
 
@@ -431,7 +448,7 @@ def track_single_frame(frame, state, settings, slot_idx=0):
     now_on_feeder = d_mm <= feeder_mm
     leaving_feeder = was_on_feeder and not now_on_feeder
 
-    if tracker is not None and (leaving_feeder or method in ("template", "darkspot", "arena_scan")):
+    if tracker is not None and (leaving_feeder or method in ("template", "darkspot", "arena_scan", "yolo")):
         tracker = create_tracker()
         if tracker is not None:
             tracker.init(frame, tuple(int(v) for v in last_bbox))
@@ -799,6 +816,7 @@ def apply_point_tag(px, py, tag_mode, frame, fps, slot_idx=0):
         upsert_coord(make_coord(cur, cx, cy, fps, slot_idx, tag_type="entry", status="manual"), slot_idx)
         slot["track_phase"] = "ready"
         slot["tracking_lost"] = False
+        get_online_trainer().add_tracking_sample(frame, cx, cy, tag_type="entry", priority=True)
 
     elif tag_mode == "help":
         slot["track_coords"] = [c for c in slot["track_coords"] if c["frame"] < cur]
@@ -808,6 +826,7 @@ def apply_point_tag(px, py, tag_mode, frame, fps, slot_idx=0):
         slot["track_phase"] = "tracking"
         slot["tracking_lost"] = False
         st.session_state.is_playing = True
+        get_online_trainer().add_tracking_sample(frame, cx, cy, tag_type="help", priority=True)
 
     elif tag_mode == "exit":
         slot["track_coords"] = [c for c in slot["track_coords"] if c["frame"] < cur]
@@ -817,6 +836,7 @@ def apply_point_tag(px, py, tag_mode, frame, fps, slot_idx=0):
         slot["track_phase"] = "tracking"
         st.session_state.is_playing = True
         slot["tracking_lost"] = False
+        get_online_trainer().add_tracking_sample(frame, cx, cy, tag_type="exit", priority=True)
 
     elif tag_mode == "analysis_end":
         slot["track_coords"] = [c for c in slot["track_coords"] if c["frame"] < cur]
@@ -825,6 +845,7 @@ def apply_point_tag(px, py, tag_mode, frame, fps, slot_idx=0):
         upsert_coord(make_coord(cur, cx, cy, fps, slot_idx, tag_type="analysis_end", status="manual"), slot_idx)
         slot["track_phase"] = "complete"
         slot["tracking_lost"] = False
+        get_online_trainer().add_tracking_sample(frame, cx, cy, tag_type="analysis_end", priority=True)
 
 
 def process_tracking_frame(frame, frame_idx, fps, settings, slot_idx=0):
@@ -841,6 +862,11 @@ def process_tracking_frame(frame, frame_idx, fps, settings, slot_idx=0):
     cx, cy = center
     upsert_coord(make_coord(frame_idx, cx, cy, fps, slot_idx, tag_type="auto", status=status), slot_idx)
     slot["track_state"] = new_state
+
+    # Online Continual Learning: Feed verified live tracking frames into self-training buffer
+    if frame_idx % 2 == 0:
+        get_online_trainer().add_tracking_sample(frame, cx, cy, tag_type="auto", priority=False)
+
     return True
 
 
@@ -1480,6 +1506,14 @@ elif st.session_state.tab == "track":
         }
         st.info(f"**Tool Active:** {mode_labels[st.session_state.tag_mode]} on **Slot {st.session_state.active_slot+1}**")
 
+    # Real-time YOLO Self-Training Status Banner
+    tr_status = get_online_trainer().get_status()
+    pulse_icon = "⚡" if tr_status["is_training"] else "🧠"
+    st.caption(
+        f"{pulse_icon} **YOLO Continual Learning**: Model `v{tr_status['model_version']}` • "
+        f"`{tr_status['sample_count']}` live frames harvested & trained • Status: *{tr_status['status']}*"
+    )
+
     # --- Inject keyboard shortcut Shift+D ---
     st.components.v1.html(
         """
@@ -2063,9 +2097,20 @@ elif st.session_state.tab == "analysis":
 
     video_export_path = os.path.join(export_dir, f"tracked_preview_{os.path.splitext(video_name)[0]}.mp4")
     
-    col_vid_btn, col_vid_stat = st.columns([2, 3])
+    col_vid_btn, col_train_btn = st.columns([1, 1])
     with col_vid_btn:
         regen_video = st.button("🔄 Re-generate Tracked Preview Video", help="Force regenerate the preview video across all tracked frames", key=f"btn_regen_vid_{st.session_state.active_slot}")
+    with col_train_btn:
+        run_self_train = st.button("🚀 Fine-Tune YOLO Model on Tracked Data", help="Harvests verified tracking data and fine-tunes YOLO to continually improve accuracy", key=f"btn_self_train_{st.session_state.active_slot}")
+
+    if run_self_train:
+        with st.spinner("Harvesting training frames and fine-tuning YOLO model for improved accuracy..."):
+            try:
+                import yolo_self_train
+                promoted_path = yolo_self_train.run_full_pipeline(epochs=15)
+                st.success(f"🎉 YOLO Continual Training Complete! Best weights promoted to: `{promoted_path}`")
+            except Exception as e:
+                st.error(f"Training error: {e}")
 
     # Gather full tracking coordinates from memory or loaded session dataframe or disk CSV
     all_coords = st.session_state.track_coords

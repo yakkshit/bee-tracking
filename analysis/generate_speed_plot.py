@@ -14,33 +14,54 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-def generate_speed_plots(search_dirs=None):
-    output_dir = os.environ.get("OUTPUT_DIR", "results/paper_plots")
-    os.makedirs(output_dir, exist_ok=True)
-    target_dir = os.environ.get("TARGET_DIR", None)
-
+def find_all_session_paths(search_dirs=None):
+    """Recursively or iteratively find all session directories containing a bee_track_*.csv file."""
     if search_dirs is None:
+        target_dir = os.environ.get("TARGET_DIR", None)
         if target_dir:
             search_dirs = [target_dir]
         else:
-            search_dirs = ['results/maries data', 'results/F']
-        
+            search_dirs = ["results/maries data", "results/F", "results"]
+
+    session_paths = []
+    seen = set()
+
+    for b_dir in search_dirs:
+        if not os.path.exists(b_dir):
+            continue
+
+        csvs = [f for f in os.listdir(b_dir) if f.startswith('bee_track_') and f.endswith('.csv') and os.path.isfile(os.path.join(b_dir, f))]
+        if csvs:
+            if b_dir not in seen:
+                session_paths.append(b_dir)
+                seen.add(b_dir)
+            continue
+
+        for root, dirs, files in os.walk(b_dir):
+            dirs[:] = [d for d in dirs if not d.endswith("paper_plots") and d != "plots"]
+            for f in files:
+                if f.startswith('bee_track_') and f.endswith('.csv'):
+                    if root not in seen:
+                        session_paths.append(root)
+                        seen.add(root)
+                    break
+
+    return sorted(session_paths)
+
+
+def generate_speed_plots(search_dirs=None):
+    output_dir = os.environ.get("OUTPUT_DIR", "results/paper_plots")
+    os.makedirs(output_dir, exist_ok=True)
+
+    session_paths = find_all_session_paths(search_dirs)
     all_instantaneous = []
     session_summaries = []
     
     print("Extracting speed data from tracked videos...")
     
-    for s_dir in search_dirs:
-        if not os.path.exists(s_dir):
-            print(f"Warning: Directory {s_dir} does not exist.")
-            continue
-            
-        folder_label = "Marie's Data" if "maries" in s_dir.lower() else "F Dataset"
-        
-        for session_name in sorted(os.listdir(s_dir)):
-            session_path = os.path.join(s_dir, session_name)
-            if not os.path.isdir(session_path):
-                continue
+    for session_path in session_paths:
+        folder_label = "Marie's Data" if "maries" in session_path.lower() else "F Dataset"
+        session_name = os.path.basename(session_path)
                 
             csv_files = [f for f in os.listdir(session_path) if f.startswith('bee_track_') and f.endswith('.csv')]
             if not csv_files:

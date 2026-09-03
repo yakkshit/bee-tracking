@@ -22,15 +22,24 @@ Cross-platform terminal launcher:
 - **Option 1 (Local / Python virtualenv)**: Runs `app.py` in local `.venv`.
 - **Option 2 (Docker)**: Launches containerized app via Docker Compose.
 
-### 3. Full Statistical & Paper Figures Pipeline (`./analysis.sh`)
-Executes trajectory processing, figure generation (Figs 9–26), speed analysis, and CSV statistical summaries:
+### 3. Plot & Analysis Pipeline (`./analysis.sh`)
+Executes either individual trajectory plots or the complete paper figures pipeline:
 ```bash
 ./analysis.sh
 ```
-- **Dataset Scope Menu**:
-  1. Combined Dataset (`results/paper_plots` or `results/f+m_paper_plots`)
-  2. Frestas Video Dataset (`results/F/F_Paper_plots`)
-  3. Marie Jansen Dataset (`results/maries data/m_paper_plots`)
+- **Option 1 (Individual Analysis)**: Prompts for the folder where tracking sessions are located (e.g. `results/F` or `results/maries data`), then runs all individual trajectory generators for every session found.
+- **Option 2 (Complete Paper Plots)**: Prompts for the tracking dataset folder (e.g. `results/F`, `results/maries data`, or `results`), creates a `paper_plots/` folder directly inside that directory, and outputs all paper figures (Figs 9–26), speed distribution analysis, and CSV statistical summaries there.
+
+### 4. YOLO Continual Self-Training (`python yolo_self_train.py`)
+Automatically harvests verified tracking frames from analyzed sessions, generates normalized YOLO bounding boxes, fine-tunes the model, and updates the active detector (`models/best_bee_yolo.pt`) to continually improve tracking accuracy:
+```bash
+# Automated harvest + fine-tuning cycle (20 epochs)
+python yolo_self_train.py --auto
+
+# Or fine-tune with custom epochs / dataset path
+python yolo_self_train.py --harvest --train --epochs 25 --sessions-dir "results/F"
+```
+*(Also accessible directly via the **"🚀 Fine-Tune YOLO Model on Tracked Data"** button in the Streamlit web application).*
 
 ---
 
@@ -39,15 +48,15 @@ Executes trajectory processing, figure generation (Figs 9–26), speed analysis,
 ```
 working/
 ├── app.py                            # Interactive Streamlit web application
+├── yolo_self_train.py               # Continual self-training pipeline for YOLO accuracy improvement
 ├── webapp.sh                         # Single-command Docker web app launcher
 ├── run.sh / run.bat                  # Cross-platform interactive CLI script
 ├── analysis.sh                       # Paper plot & statistical pipeline runner
-├── tracking_logic.py                 # Frame calculation and tracking primitives
-├── convert_trex_to_bee_track.py      # TRex format converter utility
+├── tracking_logic.py                 # BeeYOLODetector & tracking primitives
 ├── requirements.txt                  # Python package requirements
 ├── Dockerfile                        # Docker container definition
 ├── docker-compose.yml                # Docker Compose service definition
-├── yolo11n.pt                        # YOLO object detection weights
+├── yolo11n.pt                        # Base YOLO object detection weights
 │
 ├── analysis/                         # Trajectory & paper figure generators
 │   ├── generate_analysis_plots.py            # Complete session trajectories
@@ -265,4 +274,5 @@ All paper figures are systematically organized in **3 separate analysis director
 | **Fig 23** | [`fig23_exit_angle_matrix_heatmap.png`](file:///Users/yakkshit/Downloads/project/hiwi2/p1/Videos/BBP2025/working/results/paper_plots/fig23_exit_angle_matrix_heatmap.png) | **Sector Matrix Heatmap (Inner vs Outer Circle)**<br>12-sector ($30^\circ$ bins) exit frequency heatmap across 5 conditions. | Quantitative percentage exit matrix for Inner ($R=210\text{mm}$) and Outer ($R=420\text{mm}$) circles. |
 | **Fig 24** | [`fig24_speed_of_movement_analysis.png`](file:///Users/yakkshit/Downloads/project/hiwi2/p1/Videos/BBP2025/working/results/paper_plots/fig24_speed_of_movement_analysis.png) | **Speed of Movement Analysis (4 Subplots)**<br>A) Speed KDE, B) Session Mean Speeds (4 conditions), C) Zone Speeds, D) Condition Speeds. | Marie Data in Green (`#2E7D32`), F Dataset in Blue (`#1976D2`) (`fig24a-d` also standalone). |
 | **Fig 25** | [`fig25_short_vs_long_term_memory.png`](file:///Users/yakkshit/Downloads/project/hiwi2/p1/Videos/BBP2025/working/results/paper_plots/fig25_short_vs_long_term_memory.png) | **100% Stacked Memory Bar Chart (STM vs LTM)**<br>Panel A: Combined LR vs TB; Panel B: Strong/Weak LR & TB. | STM bottom in light blue (`#A0D7E6`), LTM top in dark green (`#2E7D32`) with Chi-squared stats. |
+| **Fig 26** | [`fig26_feeder_visit_percentage.png`](file:///Users/yakkshit/Downloads/project/hiwi2/p1/Videos/BBP2025/working/results/paper_plots/fig26_feeder_visit_percentage.png) | **Feeder Visit Percentage Bar Chart**<br>Return trajectory classification: Returned Back vs Still in Arena / Exited. | Percentage (%) y-axis without raw sample numbers on bars per specification. |
 | **Fig 26** | [`fig26_feeder_visit_percentage.png`](file:///Users/yakkshit/Downloads/project/hiwi2/p1/Videos/BBP2025/working/results/paper_plots/fig26_feeder_visit_percentage.png) | **Feeder Visit Percentage Bar Chart**<br>Return trajectory classification: Returned Back vs Still in Arena / Exited. | Percentage (%) y-axis without raw sample numbers on bars per specification. |

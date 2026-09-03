@@ -1,9 +1,8 @@
 """
 Generate Complete Bee Trajectory Plots for Target Sessions:
+- Accurately places Entry (Outer), 1st Inner Contact, 1st Inner Exit, and Exit (Outer) exactly on the continuous trajectory path at the boundary intersections.
+- Robust regex parsing for Bee ID and Stimulus from directory and file names.
 - Applies natural flight wave curvature to remove straight lines across all tracking jumps and hive connections.
-- Robust metadata extraction (Bee ID, Orientation, Stimulus, DoP, Outcome).
-- Accurately identifies 1st Inner Circle Contact (In) and 1st Inner Circle Exit (Out) bracketing the closest approach to the feeder.
-- Seamlessly bridges tracking jumps with smooth, natural flight curves.
 - Connects into Hive for 'Went back' trials, or shows full trajectory for 'Still in arena'.
 - Continuous 2-color gradient (Yellow -> Royal Blue) with seconds on the bottom colorbar.
 - Clean presentation without number labels on outer circle markers.
@@ -226,7 +225,7 @@ def extract_bee_id(session_dir, df=None):
             return bid.upper()
 
     sess_name = os.path.basename(os.path.normpath(session_dir)) if session_dir else ""
-    m = re.search(r'\b([RGWBYOP]_\d+|[RGWBYOP]\d+|\d+[wWgG])\b', sess_name, re.IGNORECASE)
+    m = re.search(r'(?:^|[._\s])([RGWBYOP]_\d+|[RGWBYOP]\d+|\d+[wWgGbByYoOpPrR])(?:[._\s]|$)', sess_name, re.IGNORECASE)
     if m:
         return m.group(1).upper()
 
@@ -303,9 +302,8 @@ def plot_complete_trajectory_time(session_dir):
 
     x_raw = df["x_mm"].values.copy()
     y_raw = df["y_mm"].values.copy()
-    t_raw = df["time_sec"].values
+    t_raw = df["time_sec"].values.copy()
     frames = df["frame"].values if "frame" in df.columns else np.arange(len(df))
-    dists = df["distance_from_center_mm"].values
 
     # Normalize time to start at 0.0s
     t_raw = t_raw - t_raw.min()
@@ -358,47 +356,40 @@ def plot_complete_trajectory_time(session_dir):
     lc.set_array(t_segments)
     ax.add_collection(lc)
 
-    # Crossings calculation
-    outer_entries = [i for i in range(1, len(dists)) if dists[i-1] > OUTER_R and dists[i] <= OUTER_R]
-    outer_exits = [i for i in range(1, len(dists)) if dists[i-1] <= OUTER_R and dists[i] > OUTER_R]
-    inner_entries = [i for i in range(1, len(dists)) if dists[i-1] > INNER_R and dists[i] <= INNER_R]
-    inner_exits = [i for i in range(1, len(dists)) if dists[i-1] <= INNER_R and dists[i] > INNER_R]
+    # Boundary crossings along the actual smooth continuous trajectory
+    dists_dense = np.hypot(full_x, full_y)
+    min_dist_idx = np.argmin(dists_dense)
 
-    min_dist_idx = np.argmin(dists)
-
-    # Inner entry: entry leading directly to closest approach
-    in_candidates = [i for i in inner_entries if i <= min_dist_idx]
-    inner_entry_idx = in_candidates[0] if in_candidates else (inner_entries[0] if inner_entries else None)
-
-    # Inner exit: exit following closest approach
-    out_candidates = [i for i in inner_exits if i >= min_dist_idx]
-    inner_exit_idx = out_candidates[0] if out_candidates else (inner_exits[-1] if inner_exits else None)
-
-    # Outer entry and exit
-    outer_entry_idx = outer_entries[0] if outer_entries else 0
-    outer_exit_idx = outer_exits[0] if outer_exits else None
+    outer_in_dense = [i for i in range(1, len(dists_dense)) if dists_dense[i-1] > OUTER_R and dists_dense[i] <= OUTER_R]
+    outer_out_dense = [i for i in range(1, len(dists_dense)) if dists_dense[i-1] <= OUTER_R and dists_dense[i] > OUTER_R]
+    inner_in_dense = [i for i in range(1, len(dists_dense)) if dists_dense[i-1] > INNER_R and dists_dense[i] <= INNER_R]
+    inner_out_dense = [i for i in range(1, len(dists_dense)) if dists_dense[i-1] <= INNER_R and dists_dense[i] > INNER_R]
 
     # Entry point (Clean marker, NO number label)
-    if outer_entries:
-        ex, ey = project_to_circle(x_raw[outer_entry_idx], y_raw[outer_entry_idx], OUTER_R)
+    if outer_in_dense:
+        ex, ey = full_x[outer_in_dense[0]], full_y[outer_in_dense[0]]
         ax.plot(ex, ey, "^", color=C_ENTRY, markersize=11, zorder=11)
     else:
-        ex, ey = x_raw[0], y_raw[0]
+        ex, ey = full_x[0], full_y[0]
         ax.plot(ex, ey, "^", color=C_ENTRY, markersize=11, zorder=11)
 
-    # 1st Inner contact
-    if inner_entry_idx is not None:
-        iex, iey = project_to_circle(x_raw[inner_entry_idx], y_raw[inner_entry_idx], INNER_R)
+    # 1st Inner contact (bracket closest approach)
+    if inner_in_dense:
+        in_candidates = [i for i in inner_in_dense if i <= min_dist_idx]
+        inner_entry_idx = in_candidates[-1] if in_candidates else inner_in_dense[0]
+        iex, iey = full_x[inner_entry_idx], full_y[inner_entry_idx]
         ax.plot(iex, iey, "D", color="#D32F2F", markersize=8, zorder=11)
 
-    # 1st Inner exit
-    if inner_exit_idx is not None:
-        ioex, ioey = project_to_circle(x_raw[inner_exit_idx], y_raw[inner_exit_idx], INNER_R)
+    # 1st Inner exit (bracket closest approach)
+    if inner_out_dense:
+        out_candidates = [i for i in inner_out_dense if i >= min_dist_idx]
+        inner_exit_idx = out_candidates[0] if out_candidates else inner_out_dense[-1]
+        ioex, ioey = full_x[inner_exit_idx], full_y[inner_exit_idx]
         ax.plot(ioex, ioey, "D", color="#7B1FA2", markersize=8, zorder=11)
 
     # Outer exit
-    if outer_exit_idx is not None:
-        fx, fy = project_to_circle(x_raw[outer_exit_idx], y_raw[outer_exit_idx], OUTER_R)
+    if outer_out_dense:
+        fx, fy = full_x[outer_out_dense[0]], full_y[outer_out_dense[0]]
         ax.plot(fx, fy, "o", color=C_EXIT, markersize=9, zorder=11)
 
     # Hive marker
@@ -469,20 +460,24 @@ def plot_complete_trajectory_time(session_dir):
     for name in out_names:
         p = os.path.join(plots_dir, name)
         fig.savefig(p, dpi=300, bbox_inches="tight")
-        print(f"Saved: {p}")
 
     plt.close(fig)
 
 
 if __name__ == "__main__":
-    targets = [
-        "temp/2024-11-18_16-34-47.R13.LR.P0.3_U_2",
-        "temp/2025-02-16_13-05-47.G_57_TB_P_8_U_2",
-        "results/F/2025-02-16_13-05-47.unmarked_TB_P_8_U_2",
-        "temp/2025-04-29_15-01-47_40w_p8_u1_TB_2025-04-29_15-01-47",
-        "results/maries data/2025-04-29_15-01-47_40w_p8_u1_TB_2025-04-29_15-01-47_tracked"
-    ]
-    for t in targets:
-        if os.path.exists(t):
-            print(f"\nProcessing {t}...")
-            plot_complete_trajectory_time(t)
+    def find_sessions(root_dir):
+        sessions = []
+        for dirpath, dirnames, filenames in os.walk(root_dir):
+            track_csvs = [f for f in filenames if f.startswith("bee_track_") and f.endswith(".csv")]
+            if track_csvs:
+                sessions.append(dirpath)
+        return sorted(list(set(sessions)))
+
+    all_sessions = sorted(list(set(find_sessions("results") + find_sessions("temp"))))
+    print(f"Total sessions: {len(all_sessions)}")
+    for i, s in enumerate(all_sessions, 1):
+        try:
+            print(f"[{i}/{len(all_sessions)}] Processing {s}...")
+            plot_complete_trajectory_time(s)
+        except Exception as e:
+            print(f"Error on {s}: {e}")

@@ -5,71 +5,81 @@
 **Target Audience:** Lab Professor & Research Group  
 **Location:** `/Users/yakkshit/Downloads/project/hiwi2/p1/Videos/BBP2025/working/`
 
-## 1\. Executive Summary & Purpose
+---
 
-This document provides a comprehensive technical overview of the automated trajectory processing, coordinate transformation, custom tracking application, and visualization pipeline developed for the **Bee Arena Navigation Dataset** (`results/maries/output/`).
+## 1. Executive Summary & Purpose
+
+This document provides a comprehensive technical overview of the automated trajectory processing, coordinate transformation, custom tracking application, and visualization pipeline developed for the **Bee Arena Navigation Dataset** (`results/` and `temp/`).
 
 The goal of this pipeline is to:
 
-1.  Standardize raw tracking outputs (from both **TRex** and a custom **Streamlit + YOLO/OpenCV interactive tracker**) into unified `bee_track_<session>.csv` files.
-2.  Align physical arena geometry and Hive orientation with experimental recordings.
-3.  Generate 19 standardized analysis plots per session matching the reference style in `results/F/`.
+1. Standardize tracking outputs into unified `bee_track_<session>.csv` files using the Streamlit + YOLO self-training tracking engine.
+2. Align physical arena geometry and Hive orientation with experimental recordings.
+3. Eliminate tracking gaps and straight-line drift artifacts using organic flight-wave smoothing.
+4. Calculate exact physical boundary intersections for arena crossings (`Entry (Outer)`, `1st Inner Contact`, `1st Inner Exit`, `Exit (Outer)`).
+5. Generate standardized analysis plots per session (including publication-grade 2-color time gradient plots calibrated in seconds).
 
-## 2\. Dataset Architecture & Pipeline Flow
+---
+
+## 2. Dataset Architecture & Pipeline Flow
 
 ### Data Input & Output Directories
 
-*   **Raw TRex Data Inputs**: `results/maries/output/<session_folder>/`  
-    Contains `id0_trex.csv` (frame index, pixel coordinates $X, Y$), metadata, and video files.
-*   **Custom Streamlit/YOLO Tracker App**: `app.py` & `pages/1_Analysis_Viewer.py`  
-    Used to calibrate, manually track, or review videos where TRex failed or was not run.
-*   **Reference Standard Plots**: `results/F/<session_folder>/plots/`  
-    Established baseline plot formatting and logic.
-*   **Processed TRex Outputs**: `results/m/<session_folder>/` and `results/maries/output/<session_folder>/plots/`  
-    Contains converted `bee_track_<session>.csv`, `trial_outcome.txt`, and 19 standardized trajectory plot PNGs.
+* **Tracked Datasets**: `results/maries data/<session_folder>/`, `results/F/<session_folder>/`, `temp/<session_folder>/`  
+  Contains `bee_track_*.csv`, metadata, and video files.
+* **Custom Streamlit/YOLO Tracker App**: `app.py` & `pages/1_Analysis_Viewer.py`  
+  Used to calibrate, track, and review videos with continuous YOLO detector assistance.
+* **YOLO Self-Training Engine**: `yolo_self_train.py`  
+  Harvests high-confidence tracked video frames and continually fine-tunes YOLO weights (`models/best_bee_yolo.pt`) to improve tracking accuracy.
+* **Processed Outputs**: All session directories in `results/` contain `bee_track_<session>.csv`, `trial_outcome.txt`, `zone_transitions_*.csv`, and standardized trajectory PNGs in their `plots/` directory.
 
 ### Pipeline Execution Workflow
 
 ```plaintext
 flowchart TD
-    A1["TRex Output (id0_trex.csv)"] --&gt; B1["convert_trex_to_bee_track.py"]
-    A2["Raw Video Files"] --&gt; B2["Streamlit + YOLO Tracker App (app.py)"]
-    B2 --&gt; C["Standardized bee_track_<session>.csv"]
-    B1 --&gt; C
-    C --&gt; D["generate_plots_for_sessions.py / run_all_maries.py"]
-    D --&gt; E["analysis/*.py plot modules (19 PNG figures per session)"]
+    A1["Raw Video Files"] --> B1["Streamlit + YOLO Tracker App (app.py)"]
+    B1 --> C["Standardized bee_track_<session>.csv"]
+    C --> D1["analysis.sh (Individual & Paper Plot Suite)"]
+    C --> D2["yolo_self_train.py (Continual Learning)"]
+    D2 -->|"Updates best_bee_yolo.pt"| B1
+    D1 --> E["Standardized Trajectory Figures (plots/*.png & paper_plots/)"]
 ```
 
-## 3\. Arena Geometry & Coordinate Transformation
+---
+
+## 3. Arena Geometry & Coordinate Transformation
 
 ### Spatial Reference System
 
-*   **Feeder (Center)**: Fixed at Origin $(0, 0)\\text{ mm}$.
-*   **Inner Boundary Circle**: Radius $R\_{inner} = 210.0\\text{ mm}$ (dashed grey circle).
-*   **Outer Boundary Circle**: Radius $R\_{outer} = 420.0\\text{ mm}$ (solid dark boundary).
-*   **Hive Position**:
-    *   **Marie TRex Sessions**: Fixed at **Bottom Center $(0.0, -450.0)\\text{ mm}$** (outside outer boundary at bottom entrance, matching experimental video orientation).
+* **Feeder (Center)**: Fixed at Origin $(0, 0)\text{ mm}$.
+* **Inner Boundary Circle**: Radius $R_{inner} = 210.0\text{ mm}$ (dashed grey circle).
+* **Outer Boundary Circle**: Radius $R_{outer} = 420.0\text{ mm}$ (solid dark boundary).
+* **Hive Position**:
+  * Fixed at **Bottom Center $(0.0, -450.0)\text{ mm}$** or dynamically extracted from tagged entry coordinates $(x_e, y_e)$ projected to $R = 450.0\text{ mm}$.
 
 ### Pixel to Millimeter Coordinate Mapping
 
-1.  Pixel coordinates $(x\_{px}, y\_{px})$ are centered relative to feeder center $(x\_0, y\_0)$.
-2.  Scaled using camera scale factor $s \\text{ (cm/pixel)} \\rightarrow \\text{mm}$:  
-    $$\\begin{aligned}  
-    x\_{mm} &= (x\_{px} - x\_0) \\times s \\times 10 \\  
-    y\_{mm} &= -(y\_{px} - y\_0) \\times s \\times 10  
-    \\end{aligned}$$
-3.  Radial distance from feeder: $r = \\sqrt{x\_{mm}^2 + y\_{mm}^2}$.
+1. Pixel coordinates $(x_{px}, y_{px})$ are centered relative to feeder center $(x_0, y_0)$.
+2. Scaled using camera scale factor $s \text{ (cm/pixel)} \rightarrow \text{mm}$:  
+   $$\begin{aligned}  
+   x_{mm} &= (x_{px} - x_0) \times s \times 10 \\  
+   y_{mm} &= -(y_{px} - y_0) \times s \times 10  
+   \end{aligned}$$
+3. Radial distance from feeder: $r = \sqrt{x_{mm}^2 + y_{mm}^2}$.
 
-## 4\. Key Trajectory Marker Logic
+---
 
-Each trajectory plot incorporates **4 specific circle crossing markers** that define the critical phases of a bee's trial:
+## 4. Key Trajectory Marker & Boundary Intersection Logic
 
-| Marker Symbol | Marker Name | Circle Boundary | Logic / Position |
+Boundary crossings are calculated directly from the **continuous reconstructed flight path** to ensure markers sit precisely on the trajectory line where it intersects the boundary circles:
+
+| Marker Symbol | Marker Name | Boundary | Logic / Continuous Path Calculation |
 | --- | --- | --- | --- |
-| **Marker ① (green ▲)** | 1st Outer Circle Entry | Outer Boundary ($420\\text{ mm}$) | First point where bee crosses $R \\le 420\\text{ mm}$. If video tracking starts inside the arena, defaults to **$(0.0, -420.0)\\text{ mm}$** (Hive entrance). |
-| **Marker ◆ (red diamond)** | 1st Inner Circle Entry | Inner Boundary ($210\\text{ mm}$) | First point where bee crosses $R \\le 210\\text{ mm}$ approaching the feeder. Defaults to $(0.0, -210.0)\\text{ mm}$ if tracking starts inside inner circle. |
-| **Marker ◆ (purple diamond)** | 1st Inner Circle Exit | Inner Boundary ($210\\text{ mm}$) | First point where bee crosses $R > 210\\text{ mm}$ after visiting/approaching the feeder. |
-| **Marker ① (blue ●)** | 1st Outer Circle Exit | Outer Boundary ($420\\text{ mm}$) | Final point where bee exits the $420\\text{ mm}$ outer boundary or last tracked trajectory point. |
+| **Green Triangle (▲)** | Entry (Outer) | Outer Boundary ($420\text{ mm}$) | First point along the continuous path where distance crosses $R \le 420.0\text{ mm}$ into the arena. |
+| **Red Diamond (◆)** | 1st Inner Contact (In) | Inner Boundary ($210\text{ mm}$) | Point along continuous path entering $R \le 210.0\text{ mm}$ that immediately precedes the closest approach to the feeder. |
+| **Purple Diamond (◆)** | 1st Inner Exit (Out) | Inner Boundary ($210\text{ mm}$) | Point along continuous path exiting $R > 210.0\text{ mm}$ that immediately follows the closest approach to the feeder. |
+| **Blue Circle (●)** | Exit (Outer) | Outer Boundary ($420\text{ mm}$) | Point along continuous path where the bee leaves the outer arena boundary ($R > 420.0\text{ mm}$). |
+| **Dark Circle (●)** | Hive | Outer Hive ($450\text{ mm}$) | Physical entrance to the Hive. For `Went back` trials, the flight path smoothly curves directly into this marker. |
 
 ```plaintext
                  Outer Circle (R = 420 mm)
@@ -92,67 +102,49 @@ Each trajectory plot incorporates **4 specific circle crossing markers** that de
                        (0, -450 mm)
 ```
 
-## 5\. Continuous Trajectory Reconstruction & Smoothing
+---
 
-### Smooth Motion Interpolation (No Straight Lines)
+## 5. Continuous Trajectory Reconstruction & Smoothing
 
-*   **Savitzky-Golay & B-Spline Smoothing**: Trajectory paths use adaptive polynomial smoothing (window size $w=15\\dots 17$, degree $k=2$) to preserve natural curved bee flight dynamics.
-*   **Entry Segment Connection**:
-    *   When video tracking starts inside the arena (e.g. near feeder at frame 0), an artificial straight line is **never** drawn.
-    *   Instead, a smooth curved spline segment is prepended connecting:  
-        $$\\text{Outer Entry }(0, -420) \\longrightarrow \\text{Inner Entry }(0, -210) \\longrightarrow \\text{First Tracked Coordinate } (x\_0, y\_0)$$
-    *   This ensures every trajectory connects continuously from outer circle entry to outer circle exit.
+### 1. Organic Flight Wave Gap Bridging (No Straight Lines)
+When tracking is interrupted or jumps between manual help points, artificial straight chords are eliminated using harmonic sine wave synthesis perpendicular to the flight vector:
+$$\mathbf{p}(t) = (1-t)\mathbf{p}_1 + t\mathbf{p}_2 + \mathbf{n}_\perp \cdot A \sin(\pi t) \sin(2\pi \cdot 1.5 t)$$
+Where $\mathbf{n}_\perp = (-\Delta y/L, \Delta x/L)$ and amplitude $A = \min(10.0, \max(2.5, 0.08 L))$.
 
-## 6\. Metadata Extraction & Outcome Logic
+### 2. Multi-Pass Smoothing & Arc-Length Densification
+* **Convolution & Savitzky-Golay Filtering**: Trajectory arrays are smoothed using Savitzky-Golay polynomial filters ($w = 35$, polyorder = 2) to preserve authentic flight dynamics.
+* **Arc-Length Densification**: Subsampled to 2,000+ equidistant spatial points to produce perfectly smooth 2-color gradient rendering.
 
-### 1\. Bee ID Parsing
+### 3. Hive Connection & Return Trajectory
+For trials where the outcome is `Went back` / `Returned to Hive`, the path connects seamlessly into the Hive entrance marker without sharp geometric angles or false tracker reflection drift.
 
-Bee ID is extracted directly from the session folder name using regular expressions:
+---
 
-*   Matches patterns such as `\b(\d+[wWgG])\b` (e.g., `49w` $\\rightarrow$ `**49W**`, `40w` $\\rightarrow$ `**40W**`, `70g` $\\rightarrow$ `**70G**`, `21w` $\\rightarrow$ `**21W**`).
-*   Fallbacks: Color tags (`R_1`, `G_2`), `unmarked`, or `Unknown` if unspecified.
+## 6. Metadata Extraction & Outcome Logic
 
-### 2\. Trial Outcome Determination
+### 1. Robust Metadata & Bee ID Extraction
+* **Bee ID**: Parsed from `trial_outcome.txt`, CSV columns, or directory names via regex `(?:^|[._\s])([RGWBYOP]_\d+|[RGWBYOP]\d+|\d+[wWgGbByYoOpPrR])(?:[._\s]|$)` (e.g. `G_48`, `40W`, `21W`, `W_36`, `R13`).
+* **Stimulus & Cue**: Identifies orientation (`LR`, `TB`) and stimulus parameters (e.g. `p8 u1`, `p4.4 u1`, `p0.3 u2`) and polarization degree (`DoP = 0.115`).
 
-Evaluates the final recorded coordinate $(x\_{last}, y\_{last})$ relative to Hive position $(0, -450)\\text{ mm}$:  
-$$\\text{Distance to Hive} = \\sqrt{(x\_{last} - 0)^2 + (y\_{last} - (-450))^2}$$
+### 2. Trial Outcome Determination
+* Evaluates `trial_outcome.txt` or final coordinate distance relative to the Hive:
+  * `**Went back / Returned to Hive**`: Bee returns to the hive entrance.
+  * `**Still in arena**`: Bee remains active inside the arena through the end of the analysis duration.
 
-*   `**"Returned to Hive"**`: If $\\text{Distance to Hive} \< 280\\text{ mm}$ or $y\_{last} \< -150\\text{ mm}$ near bottom wall (near Hive entrance).
-*   `**"Still in Arena"**`: If last point is far or opposite from the Hive (e.g. top arena wall $y > 0\\text{ mm}$).
+---
 
-## 7\. Interactive Streamlit + YOLO Web Tracking App (`app.py`)
+## 7. Complete Time Gradient Plot Suite
 
-In addition to automated TRex data conversion, a custom web application was built in Python using **Streamlit**, **YOLO object detection**, **OpenCV**, and `streamlit_drawable_canvas`.
+Each session generates standardized high-resolution figures in `plots/`:
 
-### Core Capabilities Beyond TRex
+1. `gradient_complete_trajectory_time.png`: Publication figure with a continuous 2-color gradient (**Bright Yellow** `#FFEE58` at $0.0\text{ s}$ $\rightarrow$ **Dark Royal Blue** `#0D47A1` at trial end), with a horizontal colorbar calibrated directly in elapsed seconds ($0.0\text{s} \to T\text{s}$).
+2. `gradient_full_trajectory_smooth.png`: Arc-length smoothed complete gradient representation.
+3. `gradient_full_trial_60fps.png` & `gradient_full_60fps_time.png`: Full trial calibrated frame-rate plots.
 
-1.  **Fallback Tracking for Untracked Videos**:
-    *   TRex sometimes fails on videos with low lighting, reflections, or occlusions.
-    *   The custom app uses a trained **YOLO / OpenCV tracking engine** to track bees in videos that TRex could not process.
-2.  **Interactive Visual Calibration**:
-    *   Researchers can load any raw MP4 video, draw on key frames to calibrate the Feeder origin $(x\_0, y\_0)$ and boundary radii ($R\_{inner}, R\_{outer}$), and visually inspect tracking quality in real time.
-3.  **Analysis Viewer (**`**pages/1_Analysis_Viewer.py**`**)**:
-    *   Interactive dashboard allowing researchers to load any session, inspect the 19 generated plots, adjust entry/exit trim sliders, and export cleaned CSV files.
+---
 
-## 8\. Plot Suite Overview (19 Output Figures per Session)
+## 8. Summary of Core Scripts & Utilities
 
-Each session folder generates 19 standardized PNG plots inside `plots/`:
-
-1.  `complete_trajectory.png` / `approach_and_home_search.png`: Full trial trajectory colored with yellow-green-blue time gradient.
-2.  `single_colour.png`: Inbound path (grey dotted) vs Outbound path (blue solid) with direction arrows.
-3.  `gradient_full_trial.png` & `gradient_exit_only.png`: Smooth two-color (yellow $\\rightarrow$ dark blue) progress gradient.
-4.  `gradient_full_trajectory_smooth.png` & `gradient_exit_trajectory_smooth.png`: Arc-length normalized smooth gradient plots.
-5.  `fixed_clean_full_trial.png` & `fixed_clean_exit_path.png`: High-contrast publication-ready figures.
-6.  `multiple_entries_exits.png`: Multi-pass trajectory decomposition with mean path.
-7.  `feeder_to_inner_circle.png` & `feeder_to_final_exit.png`: Targeted phase plots.
-
-## 9\. Summary of Script Files & Command Utilities
-
-*   `**app.py**`: Streamlit + YOLO interactive web app for tracking and arena calibration.
-*   `**convert_trex_to_bee_track.py**`: Converts TRex `id0_trex.csv` to `bee_track_<session>.csv`, calculates distances, zone transitions, Bee ID, and Trial Outcome.
-*   `**run_all_maries.py**`: Batch processes all 77 Marie sessions in sequence.
-*   `**generate_plots_for_sessions.py**`: CLI utility to generate plots for specific session names.
-*   `**analysis/*.py**`: Modular visualization scripts (`generate_single_colour_plot.py`, `generate_gradient_coloured_plot.py`, etc.).
-
-docker build -t bee-arena-tracker .  
-docker run -p 8501:8501 -v $(pwd):/app bee-arena-tracker
+* `app.py`: Streamlit + YOLO interactive web app for tracking and arena calibration.
+* `yolo_self_train.py`: Continual self-training engine that harvests tracking data and fine-tunes YOLO weights to improve detection accuracy.
+* `analysis/generate_complete_hive_trajectory_plot.py`: Master visualization script implementing continuous boundary crossing calculations, organic flight wave smoothing, relative time gradient mapping, and batch processing across all directories.

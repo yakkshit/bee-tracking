@@ -204,8 +204,8 @@ def classify_trials(df):
     }
 
 
-def load_spatial_points_by_condition(search_dirs=None):
-    """Extract spatial trajectory points (x_mm, y_mm) grouped by polarization condition."""
+def find_all_session_paths(search_dirs=None):
+    """Recursively or iteratively find all session directories containing a bee_track_*.csv file."""
     if search_dirs is None:
         target_dir = os.environ.get("TARGET_DIR", None)
         if target_dir:
@@ -213,6 +213,35 @@ def load_spatial_points_by_condition(search_dirs=None):
         else:
             search_dirs = ["results/maries data", "results/F", "results"]
 
+    session_paths = []
+    seen = set()
+
+    for b_dir in search_dirs:
+        if not os.path.exists(b_dir):
+            continue
+
+        # Check if b_dir itself contains bee_track_*.csv
+        csvs = [f for f in os.listdir(b_dir) if f.startswith('bee_track_') and f.endswith('.csv') and os.path.isfile(os.path.join(b_dir, f))]
+        if csvs:
+            if b_dir not in seen:
+                session_paths.append(b_dir)
+                seen.add(b_dir)
+            continue
+
+        for root, dirs, files in os.walk(b_dir):
+            dirs[:] = [d for d in dirs if not d.endswith("paper_plots") and d != "plots"]
+            for f in files:
+                if f.startswith('bee_track_') and f.endswith('.csv'):
+                    if root not in seen:
+                        session_paths.append(root)
+                        seen.add(root)
+                    break
+
+    return sorted(session_paths)
+
+
+def load_spatial_points_by_condition(search_dirs=None):
+    """Extract spatial trajectory points (x_mm, y_mm) grouped by polarization condition."""
     data_by_cond = {
         "Strong": {"x": [], "y": []},
         "Weak": {"x": [], "y": []},
@@ -223,32 +252,22 @@ def load_spatial_points_by_condition(search_dirs=None):
         "All": {"x": [], "y": []}
     }
 
-    found_sessions = set()
+    session_paths = find_all_session_paths(search_dirs)
 
-    for s_dir in search_dirs:
-        if not os.path.exists(s_dir):
+    for session_path in session_paths:
+        session_name = os.path.basename(session_path)
+        track_csv = None
+        for f in os.listdir(session_path):
+            if f.startswith("bee_track_") and f.endswith(".csv"):
+                track_csv = os.path.join(session_path, f)
+                break
+        if not track_csv:
             continue
-        for session_name in sorted(os.listdir(s_dir)):
-            if session_name in found_sessions or session_name in ("paper_plots", "F", "maries data", "maries", "m"):
-                continue
-            session_path = os.path.join(s_dir, session_name)
-            if not os.path.isdir(session_path):
-                continue
 
-            track_csv = None
-            for f in os.listdir(session_path):
-                if f.startswith("bee_track_") and f.endswith(".csv"):
-                    track_csv = os.path.join(session_path, f)
-                    break
-            if not track_csv:
+        try:
+            sdf = pd.read_csv(track_csv)
+            if "x_mm" not in sdf.columns or "y_mm" not in sdf.columns:
                 continue
-
-            found_sessions.add(session_name)
-
-            try:
-                sdf = pd.read_csv(track_csv)
-                if "x_mm" not in sdf.columns or "y_mm" not in sdf.columns:
-                    continue
 
                 sess_lower = session_name.lower()
                 orient = str(sdf.iloc[0].get("orientation", "LR")).strip().upper()
@@ -383,40 +402,23 @@ def load_paper_dataset(search_dirs=None):
     Dynamically scan tracking session folders and build a comprehensive dataset
     for all tracked sessions with calculated inner (R=210mm) and outer (R=420mm) exit angles.
     """
-    if search_dirs is None:
-        target_dir = os.environ.get("TARGET_DIR", None)
-        if target_dir:
-            search_dirs = [target_dir]
-        else:
-            search_dirs = ["results/maries data", "results/F", "results"]
-
+    session_paths = find_all_session_paths(search_dirs)
     rows = []
-    found_sessions = set()
 
-    for s_dir in search_dirs:
-        if not os.path.exists(s_dir):
+    for session_path in session_paths:
+        session_name = os.path.basename(session_path)
+        track_csv = None
+        for f in os.listdir(session_path):
+            if f.startswith("bee_track_") and f.endswith(".csv"):
+                track_csv = os.path.join(session_path, f)
+                break
+        if not track_csv:
             continue
-        for session_name in sorted(os.listdir(s_dir)):
-            if session_name in found_sessions or session_name in ("paper_plots", "F_Paper_plots", "m_paper_plots", "F", "maries data"):
-                continue
-            session_path = os.path.join(s_dir, session_name)
-            if not os.path.isdir(session_path):
-                continue
 
-            track_csv = None
-            for f in os.listdir(session_path):
-                if f.startswith("bee_track_") and f.endswith(".csv"):
-                    track_csv = os.path.join(session_path, f)
-                    break
-            if not track_csv:
+        try:
+            sdf = pd.read_csv(track_csv, low_memory=False)
+            if "x_mm" not in sdf.columns or "y_mm" not in sdf.columns:
                 continue
-
-            found_sessions.add(session_name)
-
-            try:
-                sdf = pd.read_csv(track_csv, low_memory=False)
-                if "x_mm" not in sdf.columns or "y_mm" not in sdf.columns:
-                    continue
 
                 xs = sdf["x_mm"].values
                 ys = sdf["y_mm"].values
@@ -590,10 +592,7 @@ def generate_feeder_visit_plot(groups):
     - No raw number annotations on graph bars per user request.
     Saved to: fig26_feeder_visit_percentage.png
     """
-    search_dirs = [get_output_dir(), "results/maries data", "results/F", "results"]
-    target_dir = os.environ.get("TARGET_DIR", None)
-    if target_dir:
-        search_dirs.insert(0, target_dir)
+    session_path_lookup = {os.path.basename(p): p for p in find_all_session_paths()}
 
     def get_return_behavior(sub_df):
         returned_back = 0
@@ -601,12 +600,7 @@ def generate_feeder_visit_plot(groups):
         total = len(sub_df)
         for _, row in sub_df.iterrows():
             sess_name = row['session_name']
-            sp = None
-            for s_dir in search_dirs:
-                cand = os.path.join(s_dir, sess_name)
-                if os.path.exists(cand) and os.path.isdir(cand):
-                    sp = cand
-                    break
+            sp = session_path_lookup.get(sess_name)
             returned_after_exit = False
             if sp and os.path.exists(sp):
                 csv_files = [f for f in os.listdir(sp) if f.startswith('bee_track_') and f.endswith('.csv')]
