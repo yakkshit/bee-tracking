@@ -185,10 +185,18 @@ def fit_circle(points):
         return None
 
 
-def pixel_to_mm(x, y, center, scale):
-    xc, yc = center
-    x_mm = (x - xc) * scale
-    y_mm = -(y - yc) * scale
+def pixel_to_mm(x, y, xc, yc, r_pixels=None, scale=None, outer_radius_mm=420.0):
+    if isinstance(xc, (tuple, list)):
+        center = xc
+        scale_val = yc
+        xc, yc = center
+        x_mm = (x - xc) * scale_val
+        y_mm = -(y - yc) * scale_val
+    else:
+        if scale is None:
+            scale = outer_radius_mm / float(r_pixels)
+        x_mm = (x - xc) * scale
+        y_mm = -(y - yc) * scale
     d_mm = float(np.sqrt(x_mm ** 2 + y_mm ** 2))
     return x_mm, y_mm, d_mm
 
@@ -199,7 +207,7 @@ def point_to_bbox(x, y, frame_shape, size=TAG_BOX_PX):
     return clamp_bbox((x - half, y - half, size, size), frame_shape)
 
 
-def draw_calibration_overlay(img, xc, yc, r_pixels, slot_idx=0):
+def draw_calibration_overlay(img, xc, yc, r_pixels, slot_idx=0, outer_radius_mm=420.0, inner_radius_mm=210.0):
     slot = st.session_state.slots[slot_idx]
     out = img.copy()
     # Outer Circle - Bright Yellow (0, 255, 255)
@@ -213,7 +221,7 @@ def draw_calibration_overlay(img, xc, yc, r_pixels, slot_idx=0):
         cv2.circle(out, (int(xc_inner[0]), int(xc_inner[1])), int(r_inner), (255, 255, 0), 2)
     else:
         # Fallback to standard 21cm inner circle
-        r_inner_calc = INNER_RADIUS_MM / (OUTER_RADIUS_MM / r_pixels)
+        r_inner_calc = inner_radius_mm / (outer_radius_mm / r_pixels)
         cv2.circle(out, (int(xc), int(yc)), int(r_inner_calc), (255, 255, 0), 2)
         
     # Feeder Center - Bright Orange
@@ -505,7 +513,9 @@ def render_player_frame(frame, coords_up_to_frame, markers, slot_idx=0, cur_cent
         slot["circle_center"][0],
         slot["circle_center"][1],
         slot["circle_radius"],
-        slot_idx
+        slot_idx,
+        outer_radius_mm=slot.get("outer_radius_mm", 420.0),
+        inner_radius_mm=slot.get("inner_radius_mm", 210.0)
     )
     if len(coords_up_to_frame) > 1:
         pts = np.array([[int(c["x_pixel"]), int(c["y_pixel"])] for c in coords_up_to_frame], np.int32).reshape((-1, 1, 2))
@@ -524,11 +534,11 @@ def render_player_frame(frame, coords_up_to_frame, markers, slot_idx=0, cur_cent
     return vis
 
 
-def build_processed_df(coords, fps, feeder_mm):
+def build_processed_df(coords, fps, feeder_mm, outer_radius_mm=420.0, inner_radius_mm=210.0):
     records, prev_zone = [], None
     for c in coords:
         d = float(np.sqrt(c["x_mm"] ** 2 + c["y_mm"] ** 2))
-        zone = "Inner" if d <= INNER_RADIUS_MM else "Outer" if d <= OUTER_RADIUS_MM else "Exited"
+        zone = "Inner" if d <= inner_radius_mm else "Outer" if d <= outer_radius_mm else "Exited"
         transition = f"{prev_zone} -> {zone}" if prev_zone and zone != prev_zone else None
         prev_zone = zone
         records.append(
@@ -541,7 +551,7 @@ def build_processed_df(coords, fps, feeder_mm):
                 "y_mm": round(float(c["y_mm"]), 2),
                 "distance_from_center_mm": round(d, 2),
                 "current_zone": zone,
-                "in_arena": d <= OUTER_RADIUS_MM,
+                "in_arena": d <= outer_radius_mm,
                 "on_feeder": d <= feeder_mm,
                 "transition_event": transition,
                 "tag_type": c.get("tag_type", "auto"),
@@ -550,17 +560,17 @@ def build_processed_df(coords, fps, feeder_mm):
     return pd.DataFrame(records)
 
 
-def plot_trajectory(df, entry_frame=None, exit_frame=None, title="Bee Trajectory", bee_id="unknown", outcome="Unknown", hive_entry_mm=None, orientation="unknown", p_val="unknown", u_val="unknown", dop="unknown"):
+def plot_trajectory(df, entry_frame=None, exit_frame=None, title="Bee Trajectory", bee_id="unknown", outcome="Unknown", hive_entry_mm=None, orientation="unknown", cue_val="unknown", p_val="unknown", u_val="unknown", dop="unknown", outer_radius_mm=420.0, inner_radius_mm=210.0):
     fig, ax = plt.subplots(figsize=(8, 8), facecolor="white")
     
     # Outer circle boundary (dimgrey, solid)
-    ax.add_patch(plt.Circle((0, 0), OUTER_RADIUS_MM, fill=False, color="#333333", lw=2, label="Outer Boundary (r = 42 cm)"))
+    ax.add_patch(plt.Circle((0, 0), outer_radius_mm, fill=False, color="#333333", lw=2, label=f"Outer Boundary (r = {outer_radius_mm/10} cm)"))
     # Inner circle boundary (darkgrey, dashed)
-    ax.add_patch(plt.Circle((0, 0), INNER_RADIUS_MM, fill=False, color="#666666", lw=1.5, ls="--", label="Inner Boundary (r = 21 cm)"))
+    ax.add_patch(plt.Circle((0, 0), inner_radius_mm, fill=False, color="#666666", lw=1.5, ls="--", label=f"Inner Boundary (r = {inner_radius_mm/10} cm)"))
     
     # Text labels at the top of circles
-    ax.text(0, OUTER_RADIUS_MM + 10, "Outer Boundary (r = 42 cm)", ha="center", va="bottom", color="#333333", fontsize=9, fontweight="semibold")
-    ax.text(0, INNER_RADIUS_MM + 10, "Inner Boundary (r = 21 cm)", ha="center", va="bottom", color="#666666", fontsize=9, fontweight="semibold")
+    ax.text(0, outer_radius_mm + 10, f"Outer Boundary (r = {outer_radius_mm/10} cm)", ha="center", va="bottom", color="#333333", fontsize=9, fontweight="semibold")
+    ax.text(0, inner_radius_mm + 10, f"Inner Boundary (r = {inner_radius_mm/10} cm)", ha="center", va="bottom", color="#666666", fontsize=9, fontweight="semibold")
 
     x_mm, y_mm, t_sec = df["x_mm"].values, df["y_mm"].values, df["time_sec"].values
 
@@ -621,7 +631,7 @@ def plot_trajectory(df, entry_frame=None, exit_frame=None, title="Bee Trajectory
 
     ax.plot(0, 0, "o", color="#FB8500", ms=10, label="Feeder (0,0)")
     # Dynamic axis limits to ensure all elements (circles and path) are fully visible
-    max_val = float(max(OUTER_RADIUS_MM + 20.0,
+    max_val = float(max(outer_radius_mm + 20.0,
                         np.max(np.abs(x_mm)) if len(x_mm) > 0 else 0,
                         np.max(np.abs(y_mm)) if len(y_mm) > 0 else 0))
     lim = max_val + 20.0
@@ -635,16 +645,13 @@ def plot_trajectory(df, entry_frame=None, exit_frame=None, title="Bee Trajectory
     fig.suptitle(title, fontsize=12, fontweight="bold")
     
     # Overlay metadata text box inside the plot
-    textstr = f"Bee ID: {bee_id}\nOutcome: {outcome}"
-    props = dict(boxstyle='round', facecolor='#f5f5f5', edgecolor='#cccccc', alpha=0.85)
-    ax.text(0.03, 0.03, textstr, transform=ax.transAxes, fontsize=10,
-            fontweight='bold', verticalalignment='bottom', bbox=props)
+    ax.text(0.5, 0.95, f"Outcome: {outcome} | Orientation: {orientation} | CUE: {cue_val} | P: {p_val} | u: {u_val} | Dop: {dop}", ha="center", va="center", transform=ax.transAxes, fontsize=10, bbox=dict(facecolor='white', alpha=0.8, edgecolor='none'))
             
     ax.legend(bbox_to_anchor=(1.04, 1.0), loc="upper left", fontsize=9, framealpha=1, facecolor="white", edgecolor="#cccccc")
     return fig
 
 
-def generate_tracked_video(video_path, coords, entry_frame, exit_frame, output_path, circle_center, circle_radius, progress_callback=None):
+def generate_tracked_video(video_path, coords, entry_frame, exit_frame, output_path, circle_center, circle_radius, progress_callback=None, outer_radius_mm=420.0, inner_radius_mm=210.0):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return False
@@ -701,7 +708,7 @@ def generate_tracked_video(video_path, coords, entry_frame, exit_frame, output_p
         if not ret:
             break
 
-        vis = draw_calibration_overlay(frame, circle_center[0], circle_center[1], circle_radius)
+        vis = draw_calibration_overlay(frame, circle_center[0], circle_center[1], circle_radius, outer_radius_mm=outer_radius_mm, inner_radius_mm=inner_radius_mm)
 
         # Advance coordinate pointer up to current frame (O(1) amortized)
         while coord_idx < num_coords and coord_frames[coord_idx] <= f_idx:
@@ -899,6 +906,14 @@ DEFAULTS = {
     "circle_radius": None,
     "inner_circle_center": None,
     "inner_circle_radius": None,
+    "outer_radius_mm": 420.0,
+    "inner_radius_mm": 210.0,
+    "meta_cue": "",
+    "meta_p": "",
+    "meta_u": "",
+    "meta_dop": "",
+    "meta_bid": "",
+    "checkerboard_scale_factor": None,
     "hive_entry_point": None,
     "scale_factor": None,
     "tracking_fps": 30.0,
@@ -939,6 +954,14 @@ SLOT_KEYS = [
     "circle_radius",
     "inner_circle_center",
     "inner_circle_radius",
+    "outer_radius_mm",
+    "inner_radius_mm",
+    "meta_cue",
+    "meta_p",
+    "meta_u",
+    "meta_dop",
+    "meta_bid",
+    "checkerboard_scale_factor",
     "hive_entry_point",
     "scale_factor",
     "entry_frame",
@@ -971,6 +994,14 @@ if "slots" not in st.session_state:
             "circle_radius": None,
             "inner_circle_center": None,
             "inner_circle_radius": None,
+            "outer_radius_mm": 420.0,
+            "inner_radius_mm": 210.0,
+            "meta_cue": "",
+            "meta_p": "",
+            "meta_u": "",
+            "meta_dop": "",
+            "meta_bid": "",
+            "checkerboard_scale_factor": None,
             "hive_entry_point": None,
             "scale_factor": None,
             "entry_frame": None,
@@ -1290,10 +1321,54 @@ elif st.session_state.tab == "calibrate":
         st.warning("Please setup a video in Video Setup first.")
         st.stop()
 
+    with st.expander("🛠️ Metadata & Arena Settings", expanded=True):
+        mc1, mc2, mc3 = st.columns(3)
+        st.session_state.meta_bid = mc1.text_input("Bee ID (BID)", value=st.session_state.meta_bid)
+        st.session_state.meta_cue = mc2.text_input("CUE", value=st.session_state.meta_cue)
+        st.session_state.meta_p = mc3.text_input("P value", value=st.session_state.meta_p)
+        st.session_state.meta_u = mc1.text_input("u value", value=st.session_state.meta_u)
+        st.session_state.meta_dop = mc2.text_input("Dop value", value=st.session_state.meta_dop)
+        
+        st.markdown("#### Arena Dimensions")
+        rc1, rc2 = st.columns(2)
+        st.session_state.outer_radius_mm = rc1.number_input("Outer Radius (mm)", value=float(st.session_state.outer_radius_mm), step=10.0)
+        st.session_state.inner_radius_mm = rc2.number_input("Inner Radius (mm)", value=float(st.session_state.inner_radius_mm), step=10.0)
+
+    with st.expander("🏁 Advanced: Checkerboard Pixel Calibration", expanded=False):
+        st.markdown("Upload a checkerboard image to calibrate the pixel-to-mm scale factor directly.")
+        cb_file = st.file_uploader("Upload Checkerboard Image", type=["png", "jpg", "jpeg"])
+        cc1, cc2, cc3 = st.columns(3)
+        cb_sq_size = cc1.number_input("Square Size (mm)", value=25.0, step=1.0)
+        cb_cols = cc2.number_input("Inner Corners (Cols)", value=9, step=1)
+        cb_rows = cc3.number_input("Inner Corners (Rows)", value=6, step=1)
+        
+        if cb_file is not None:
+            if st.button("Calculate Scale Factor"):
+                file_bytes = np.asarray(bytearray(cb_file.read()), dtype=np.uint8)
+                cb_img = cv2.imdecode(file_bytes, 1)
+                gray_cb = cv2.cvtColor(cb_img, cv2.COLOR_BGR2GRAY)
+                ret, corners = cv2.findChessboardCorners(gray_cb, (int(cb_cols), int(cb_rows)), None)
+                if ret:
+                    # Calculate pixel distance between two adjacent corners
+                    dists = []
+                    for i in range(int(cb_cols) - 1):
+                        p1 = corners[i][0]
+                        p2 = corners[i+1][0]
+                        dists.append(np.linalg.norm(p1 - p2))
+                    avg_px = np.mean(dists)
+                    calc_scale = cb_sq_size / avg_px
+                    st.session_state.checkerboard_scale_factor = calc_scale
+                    st.success(f"Checkerboard calibration successful! Scale: {calc_scale:.4f} mm/px")
+                else:
+                    st.error("Could not find checkerboard pattern. Ensure inner corners count is correct.")
+        
+        if st.session_state.checkerboard_scale_factor:
+            st.info(f"Using checkerboard scale factor: {st.session_state.checkerboard_scale_factor:.4f} mm/px")
+
     if st.button("Load demo calibration parameters", key=f"demo_calib_{st.session_state.active_slot}"):
         st.session_state.circle_center = (942.0, 433.0)
         st.session_state.circle_radius = 379.0
-        st.session_state.scale_factor = OUTER_RADIUS_MM / 379.0
+        st.session_state.scale_factor = st.session_state.outer_radius_mm / 379.0
         st.session_state.inner_circle_center = (942.0, 433.0)
         st.session_state.inner_circle_radius = 189.5
         st.session_state.hive_entry_point = (1300.0, 433.0)
@@ -1362,7 +1437,13 @@ elif st.session_state.tab == "calibrate":
 
                 st.session_state.circle_center = (xc_o, yc_o)
                 st.session_state.circle_radius = r_o
-                st.session_state.scale_factor = OUTER_RADIUS_MM / r_o
+                
+                # Use checkerboard scale factor if available, otherwise calculate from outer circle
+                if st.session_state.checkerboard_scale_factor:
+                    st.session_state.scale_factor = st.session_state.checkerboard_scale_factor
+                else:
+                    st.session_state.scale_factor = st.session_state.outer_radius_mm / r_o
+                    
                 st.session_state.inner_circle_center = (xc_i, yc_i)
                 st.session_state.inner_circle_radius = r_i
                 st.session_state.hive_entry_point = hive_entry
@@ -1792,15 +1873,28 @@ elif st.session_state.tab == "track":
 
             if slot_cur >= end_f:
                 slot["track_phase"] = "complete"
+                if "live_writer" in slot and slot["live_writer"] is not None:
+                    slot["live_writer"].release()
+                    slot["live_writer"] = None
                 continue
 
             next_f = slot_cur + stride
             if next_f > end_f:
                 slot["track_phase"] = "complete"
+                if "live_writer" in slot and slot["live_writer"] is not None:
+                    slot["live_writer"].release()
+                    slot["live_writer"] = None
                 continue
 
             ok_n, frame_n = read_frame(slot["video_path"], next_f)
             if ok_n:
+                if slot["video_path"] == "live":
+                    if "live_writer" not in slot or slot["live_writer"] is None:
+                        os.makedirs(slot["results_dir"], exist_ok=True)
+                        raw_path = os.path.join(slot["results_dir"], "raw_feed.mp4")
+                        slot["live_writer"] = cv2.VideoWriter(raw_path, cv2.VideoWriter_fourcc(*'mp4v'), 30, (frame_n.shape[1], frame_n.shape[0]))
+                    slot["live_writer"].write(frame_n)
+
                 slot_fps = slot.get("tracking_fps") or slot_meta["fps"] or 30.0
                 if process_tracking_frame(frame_n, next_f, slot_fps, settings, idx):
                     slot["player_frame"] = next_f
@@ -1812,6 +1906,9 @@ elif st.session_state.tab == "track":
                     any_advanced = True
             else:
                 slot["track_phase"] = "complete"
+                if "live_writer" in slot and slot["live_writer"] is not None:
+                    slot["live_writer"].release()
+                    slot["live_writer"] = None
 
         if any_advanced:
             time.sleep(0.015)
@@ -2166,15 +2263,21 @@ elif st.session_state.tab == "analysis":
         def update_prog(p):
             prog_bar.progress(p, text=f"Rendering preview video: {int(p * 100)}% complete...")
 
+        target_video_path = st.session_state.video_path
+        if target_video_path == "live":
+            target_video_path = os.path.join(export_dir, "raw_feed.mp4")
+
         success = generate_tracked_video(
-            st.session_state.video_path,
+            target_video_path,
             all_coords,
             st.session_state.entry_frame,
-            final_end_f,
+            st.session_state.exit_frame,
             video_export_path,
             st.session_state.circle_center,
             st.session_state.circle_radius,
-            progress_callback=update_prog
+            update_prog,
+            outer_radius_mm=st.session_state.outer_radius_mm,
+            inner_radius_mm=st.session_state.inner_radius_mm
         )
         prog_bar.empty()
         if success:
@@ -2297,6 +2400,14 @@ elif st.session_state.tab == "analysis":
                 "circle_radius": None,
                 "inner_circle_center": None,
                 "inner_circle_radius": None,
+                "outer_radius_mm": 420.0,
+                "inner_radius_mm": 210.0,
+                "meta_cue": "",
+                "meta_p": "",
+                "meta_u": "",
+                "meta_dop": "",
+                "meta_bid": "",
+                "checkerboard_scale_factor": None,
                 "hive_entry_point": None,
                 "scale_factor": None,
                 "entry_frame": None,
