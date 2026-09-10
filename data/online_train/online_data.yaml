@@ -1,0 +1,6 @@
+# Online Real-time YOLO Dataset
+path: /Users/yakkshit/Downloads/project/hiwi2/p1/Videos/BBP2025/working/data/online_train
+train: images/train
+val: images/val
+names:
+  0: bee

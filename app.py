@@ -781,7 +781,15 @@ def fmt_time(frame, fps):
     return f"{m}:{s:02d}"
 
 
+@st.cache_resource
+def get_live_camera():
+    return cv2.VideoCapture(0)
+
 def read_frame(video_path, frame_idx):
+    if video_path == "live":
+        cap = get_live_camera()
+        ok, frame = cap.read()
+        return ok, frame
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
     ok, frame = cap.read()
@@ -790,6 +798,13 @@ def read_frame(video_path, frame_idx):
 
 
 def video_meta(video_path):
+    if video_path == "live":
+        return {
+            "w": 640,
+            "h": 480,
+            "fps": 30.0,
+            "frames": 999999,
+        }
     cap = cv2.VideoCapture(video_path)
     meta = {
         "w": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
@@ -1088,6 +1103,13 @@ if st.session_state.tab == "load":
 
     st.markdown(f"#### Loading Video for **Slot {st.session_state.active_slot + 1}**")
     
+    if st.checkbox(f"📷 Use Live Camera Feed (Slot {st.session_state.active_slot + 1})", value=False, key=f"use_live_{st.session_state.active_slot}"):
+        st.session_state.video_path = "live"
+        st.session_state.video_name = "Live Camera"
+        st.session_state.selected_video_index = None
+        st.session_state.video_folder = ""
+        st.session_state.local_videos = []
+
     workspace_video = "2024-11-17 17-04-16.R13.LR.P0U8.mp4"
     if os.path.exists(workspace_video):
         if st.checkbox(f"Use default workspace video `{workspace_video}` (Slot {st.session_state.active_slot + 1})", value=False, key=f"use_workspace_{st.session_state.active_slot}"):
@@ -1649,28 +1671,30 @@ elif st.session_state.tab == "track":
 
             pc1, pc2, pc3 = st.columns([5, 2, 2])
             with pc1:
-                st.slider(
-                    f"Timeline Slot {i+1}",
-                    0,
-                    slot_max,
-                    value=slot["player_frame"],
-                    label_visibility="collapsed",
-                    key=f"timeline_slider_widget_{i}",
-                    on_change=on_timeline_change,
-                    args=(i,)
-                )
+                if slot["video_path"] != "live":
+                    st.slider(
+                        f"Timeline Slot {i+1}",
+                        0,
+                        slot_max,
+                        value=slot["player_frame"],
+                        label_visibility="collapsed",
+                        key=f"timeline_slider_widget_{i}",
+                        on_change=on_timeline_change,
+                        args=(i,)
+                    )
             with pc2:
-                st.number_input(
-                    f"Frame Slot {i+1}",
-                    min_value=0,
-                    max_value=slot_max,
-                    value=slot["player_frame"],
-                    step=1,
-                    label_visibility="collapsed",
-                    key=f"frame_num_widget_{i}",
-                    on_change=on_num_change,
-                    args=(i,)
-                )
+                if slot["video_path"] != "live":
+                    st.number_input(
+                        f"Frame Slot {i+1}",
+                        min_value=0,
+                        max_value=slot_max,
+                        value=slot["player_frame"],
+                        step=1,
+                        label_visibility="collapsed",
+                        key=f"frame_num_widget_{i}",
+                        on_change=on_num_change,
+                        args=(i,)
+                    )
             with pc3:
                 if i != st.session_state.active_slot:
                     if st.button("Activate", key=f"activate_slot_btn_{i}", use_container_width=True, help="Activate this slot for tagging"):
@@ -1721,7 +1745,7 @@ elif st.session_state.tab == "track":
             any_ready = False
             for idx in range(num_slots):
                 sl = st.session_state.slots[idx]
-                if sl["video_path"] and sl["entry_frame"] is not None:
+                if sl["video_path"] == "live" or (sl["video_path"] and sl["entry_frame"] is not None):
                     any_ready = True
             if not any_ready:
                 st.warning("Set an Entry tag on at least one video first.")
@@ -1730,6 +1754,8 @@ elif st.session_state.tab == "track":
                 if st.session_state.is_playing:
                     for idx in range(num_slots):
                         sl = st.session_state.slots[idx]
+                        if sl["video_path"] == "live" and sl["track_phase"] == "idle":
+                            sl["track_phase"] = "tracking"
                         if sl["track_phase"] in ("ready", "tracking", "paused_lost") and not sl["tracking_lost"]:
                             sl["track_phase"] = "tracking"
                             sl["track_coords"] = [c for c in sl["track_coords"] if c["frame"] <= sl["player_frame"]]
@@ -2303,3 +2329,8 @@ elif st.session_state.tab == "analysis":
 
 # Sync flat keys back to active slot at the end of execution
 sync_flat_to_active_slot()
+
+if st.session_state.tab == "track" and not st.session_state.is_playing:
+    if any(s["video_path"] == "live" for s in st.session_state.slots[:st.session_state.num_slots]):
+        time.sleep(0.05)
+        st.rerun()
