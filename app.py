@@ -159,10 +159,10 @@ TAG_BOX_PX = 44
 CANVAS_W = 900
 
 TRACK_SETTINGS = {
-    "template_threshold": 0.28,
-    "search_margin": 0.55,
-    "lost_threshold": 0.30,
-    "template_update_interval": 25,
+    "template_threshold": 0.25,
+    "search_margin": 2.5,
+    "lost_threshold": 0.25,
+    "template_update_interval": 10,
     "feeder_radius_mm": 40.0,
 }
 
@@ -384,7 +384,7 @@ def track_single_frame(frame, state, settings, slot_idx=0):
         _, _, last_d = pixel_to_mm(last_center[0], last_center[1], (xc, yc), scale)
         near_feeder = near_feeder or last_d <= feeder_mm * 2.0
 
-    search_margin = base_margin * 4.0 if near_feeder else base_margin
+    search_margin = base_margin * 1.5 if near_feeder else base_margin
     detected, confidence, method = None, 0.0, "hold"
 
     if tracker is not None and tracker_ok:
@@ -407,11 +407,11 @@ def track_single_frame(frame, state, settings, slot_idx=0):
             confidence, method = conf, "template"
 
     if detected is None and last_center is not None:
-        win = 200 if near_feeder else 90
+        win = 300 if near_feeder else 250
         spot = find_darkest_spot_in_roi(gray, last_center, (win, win))
         if spot:
             dist_px = np.hypot(spot[0] - last_center[0], spot[1] - last_center[1])
-            if dist_px <= (220 if near_feeder else 90):
+            if dist_px <= (330 if near_feeder else 280):
                 detected = spot
                 bw = last_bbox[2] if last_bbox else TAG_BOX_PX
                 bh = last_bbox[3] if last_bbox else TAG_BOX_PX
@@ -434,11 +434,11 @@ def track_single_frame(frame, state, settings, slot_idx=0):
     # YOLO Detector Fallback & Re-acquisition (Continuously fine-tuned for high accuracy)
     if detected is None:
         yolo_det = get_yolo_detector()
-        yolo_res = yolo_det.detect_bee(frame, roi=last_bbox if last_bbox else None, conf_threshold=0.25)
+        yolo_res = yolo_det.detect_bee(frame, roi=last_bbox if last_bbox else None, conf_threshold=0.15)
         if yolo_res is None and last_center is not None:
-            win = 320 if near_feeder else 200
+            win = 400 if near_feeder else 300
             roi = (last_center[0] - win / 2, last_center[1] - win / 2, win, win)
-            yolo_res = yolo_det.detect_bee(frame, roi=roi, conf_threshold=0.20)
+            yolo_res = yolo_det.detect_bee(frame, roi=roi, conf_threshold=0.10)
 
         if yolo_res:
             ycx, ycy, yw, yh, yconf = yolo_res
@@ -789,12 +789,15 @@ def fmt_time(frame, fps):
 
 
 @st.cache_resource
-def get_live_camera():
-    return cv2.VideoCapture(0)
+def get_live_camera(cam_idx):
+    if os.name == 'nt':
+        return cv2.VideoCapture(cam_idx, cv2.CAP_DSHOW)
+    return cv2.VideoCapture(cam_idx)
 
 def read_frame(video_path, frame_idx):
     if video_path == "live":
-        cap = get_live_camera()
+        cam_idx = st.session_state.get("camera_index", 0)
+        cap = get_live_camera(cam_idx)
         ok, frame = cap.read()
         return ok, frame
     cap = cv2.VideoCapture(video_path)
@@ -1140,6 +1143,7 @@ if st.session_state.tab == "load":
         st.session_state.selected_video_index = None
         st.session_state.video_folder = ""
         st.session_state.local_videos = []
+        st.session_state.camera_index = st.number_input("Camera Index (0=built-in, 1=external USB/IR):", min_value=0, max_value=10, value=st.session_state.get("camera_index", 0), key=f"cam_idx_{st.session_state.active_slot}")
 
     workspace_video = "2024-11-17 17-04-16.R13.LR.P0U8.mp4"
     if os.path.exists(workspace_video):
@@ -1418,6 +1422,7 @@ elif st.session_state.tab == "calibrate":
 
     st.markdown(f"**Points clicked:** `{num_clicked} / 9`")
 
+    orig = []
     if result.json_data:
         pts = []
         for obj in result.json_data.get("objects", []):
@@ -1426,49 +1431,53 @@ elif st.session_state.tab == "calibrate":
                 pts.append((obj["left"] + r, obj["top"] + r))
         orig = [(p[0] * ratio, p[1] * ratio) for p in pts]
 
-        if len(orig) >= 9:
-            fit_outer = fit_circle(orig[:4])
-            fit_inner = fit_circle(orig[4:8])
-            hive_entry = orig[8]
+    if len(orig) >= 9:
+        st.session_state.calibration_points = orig[:9]
+        
+    if "calibration_points" in st.session_state and len(st.session_state.calibration_points) == 9:
+        saved_orig = st.session_state.calibration_points
+        fit_outer = fit_circle(saved_orig[:4])
+        fit_inner = fit_circle(saved_orig[4:8])
+        hive_entry = saved_orig[8]
 
-            if fit_outer and fit_inner:
-                xc_o, yc_o, r_o = fit_outer
-                xc_i, yc_i, r_i = fit_inner
+        if fit_outer and fit_inner:
+            xc_o, yc_o, r_o = fit_outer
+            xc_i, yc_i, r_i = fit_inner
 
-                st.session_state.circle_center = (xc_o, yc_o)
-                st.session_state.circle_radius = r_o
-                
-                # Use checkerboard scale factor if available, otherwise calculate from outer circle
-                if st.session_state.checkerboard_scale_factor:
-                    st.session_state.scale_factor = st.session_state.checkerboard_scale_factor
-                else:
-                    st.session_state.scale_factor = st.session_state.outer_radius_mm / r_o
-                    
-                st.session_state.inner_circle_center = (xc_i, yc_i)
-                st.session_state.inner_circle_radius = r_i
-                st.session_state.hive_entry_point = hive_entry
-
-                overlay = draw_calibration_overlay(frame0, xc_o, yc_o, r_o, st.session_state.active_slot)
-                st.image(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB), use_container_width=True, caption="Fitted Calibration Overlay Preview")
-
-                if st.button("Next: Start tracking room →", type="primary", key="done_calib_btn"):
-                    sync_flat_to_active_slot()
-                    st.session_state.tab = "track"
-                    for i in range(num_slots):
-                        slot = st.session_state.slots[i]
-                        slot["player_frame"] = 0
-                        slot["last_player_frame"] = 0
-                        slot["timeline_slider"] = 0
-                        slot["frame_number_input"] = 0
-                        slot["track_coords"] = []
-                        slot["track_phase"] = "idle"
-                    st.session_state.is_playing = False
-                    sync_active_slot_to_flat()
-                    st.rerun()
+            st.session_state.circle_center = (xc_o, yc_o)
+            st.session_state.circle_radius = r_o
+            
+            # Use checkerboard scale factor if available, otherwise calculate from outer circle
+            if st.session_state.checkerboard_scale_factor:
+                st.session_state.scale_factor = st.session_state.checkerboard_scale_factor
             else:
-                st.error("Could not fit circles. Verify you clicked exactly on the rims.")
-        elif len(orig) >= 4:
-            st.info("Keep clicking: click 4 points for the inner circle, and then 1 point for the hive entry.")
+                st.session_state.scale_factor = st.session_state.outer_radius_mm / r_o
+                
+            st.session_state.inner_circle_center = (xc_i, yc_i)
+            st.session_state.inner_circle_radius = r_i
+            st.session_state.hive_entry_point = hive_entry
+
+            overlay = draw_calibration_overlay(frame0, xc_o, yc_o, r_o, st.session_state.active_slot)
+            st.image(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB), use_container_width=True, caption="Fitted Calibration Overlay Preview")
+
+            if st.button("Next: Start tracking room →", type="primary", key="done_calib_btn"):
+                sync_flat_to_active_slot()
+                st.session_state.tab = "track"
+                for i in range(num_slots):
+                    slot = st.session_state.slots[i]
+                    slot["player_frame"] = 0
+                    slot["last_player_frame"] = 0
+                    slot["timeline_slider"] = 0
+                    slot["frame_number_input"] = 0
+                    slot["track_coords"] = []
+                    slot["track_phase"] = "idle"
+                st.session_state.is_playing = False
+                sync_active_slot_to_flat()
+                st.rerun()
+        else:
+            st.error("Could not fit circles. Verify you clicked exactly on the rims.")
+    elif len(orig) >= 4:
+        st.info("Keep clicking: click 4 points for the inner circle, and then 1 point for the hive entry.")
     st.markdown("</div>", unsafe_allow_html=True)
 
 

@@ -1,6 +1,31 @@
 @echo off
 title Bee Arena Tracker Startup
-echo === Starting Bee Arena Tracker ===
+echo =================================================
+echo           🐝 BEE ARENA TRACKER LAUNCHER          
+echo =================================================
+echo How would you like to run the application?
+echo   [1] Locally (Python virtualenv)
+echo   [2] Docker (Containerized)
+echo =================================================
+set /p choice="Select option (1 or 2) [Default: 1]: "
+if "%choice%"=="" set choice=1
+
+if "%choice%"=="2" (
+    echo.
+    echo === Launching with Docker ===
+    docker-compose down
+    docker-compose up -d --build
+    if %errorlevel% neq 0 (
+        docker compose down
+        docker compose up -d --build
+    )
+    echo Docker container started in detached mode. Access the app at http://localhost:8501
+    pause
+    exit /b 0
+)
+
+echo.
+echo === Launching Locally ===
 
 rem Check if virtual environment directory exists
 if exist .venv\Scripts\activate.bat (
@@ -32,3 +57,4 @@ echo Launching Streamlit application...
 streamlit run app.py
 
 pause
+

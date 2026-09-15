@@ -36,10 +36,13 @@ if [ "$CHOICE" == "2" ]; then
     fi
 
     if command -v docker-compose &>/dev/null; then
-        docker-compose up --build
+        docker-compose down
+        docker-compose up -d --build
     else
-        docker compose up --build
+        docker compose down
+        docker compose up -d --build
     fi
+    echo "Docker container started in detached mode. Access the app at http://localhost:8501"
     exit 0
 fi
 

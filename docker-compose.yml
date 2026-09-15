@@ -8,6 +8,8 @@ services:
       - "8501:8501"
     volumes:
       - .:/app
+      - ./data:/app/data
+      - ./results:/app/results
       - ${HOME:-~}:/host_home:ro
     environment:
       - PYTHONUNBUFFERED=1
