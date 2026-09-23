@@ -59,69 +59,169 @@ from tracking_logic import get_tracking_end_frame, get_yolo_detector, get_online
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="Bee Arena Tracker", page_icon="🐝", layout="wide", initial_sidebar_state="collapsed")
 
-# Premium Linear/Vercel styling
+# Responsive adaptive styling for both Light and Dark Streamlit themes
 st.markdown(
     """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     
+    /* CSS Variables: Default Light Theme */
+    :root {
+        --bg-app: #FAFAFA;
+        --text-main: #0F172A;
+        --text-sub: #475569;
+        --card-bg: #FFFFFF;
+        --card-border: #E2E8F0;
+        --card-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+        --player-bg: #F8FAFC;
+        --player-border: #CBD5E1;
+        --badge-idle-bg: #E2E8F0;
+        --badge-idle-txt: #1E293B;
+        --badge-ready-bg: #DCFCE7;
+        --badge-ready-txt: #14532D;
+        --badge-tracking-bg: #DBEAFE;
+        --badge-tracking-txt: #1E40AF;
+        --badge-lost-bg: #FEE2E2;
+        --badge-lost-txt: #991B1B;
+        --badge-complete-bg: #DCFCE7;
+        --badge-complete-txt: #15803D;
+        --tab-inactive-txt: #475569;
+        --tab-active-txt: #2563EB;
+        --tab-border: #CBD5E1;
+    }
+
+    /* OS Dark Theme Preference */
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --bg-app: #0B0F17;
+            --text-main: #F8FAFC;
+            --text-sub: #9CA3AF;
+            --card-bg: #161B26;
+            --card-border: #232D3F;
+            --card-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
+            --player-bg: #0F131E;
+            --player-border: #1F293D;
+            --badge-idle-bg: #374151;
+            --badge-idle-txt: #D1D5DB;
+            --badge-ready-bg: #065F46;
+            --badge-ready-txt: #A7F3D0;
+            --badge-tracking-bg: #1E3A8A;
+            --badge-tracking-txt: #BFDBFE;
+            --badge-lost-bg: #7F1D1D;
+            --badge-lost-txt: #FCA5A5;
+            --badge-complete-bg: #14532D;
+            --badge-complete-txt: #86EFAC;
+            --tab-inactive-txt: #9CA3AF;
+            --tab-active-txt: #3B82F6;
+            --tab-border: #1F293D;
+        }
+    }
+
+    /* Streamlit explicit Dark theme toggle */
+    [data-theme="dark"], body.dark, [data-testid="stAppViewContainer"][data-theme="dark"] {
+        --bg-app: #0B0F17;
+        --text-main: #F8FAFC;
+        --text-sub: #9CA3AF;
+        --card-bg: #161B26;
+        --card-border: #232D3F;
+        --card-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
+        --player-bg: #0F131E;
+        --player-border: #1F293D;
+        --badge-idle-bg: #374151;
+        --badge-idle-txt: #D1D5DB;
+        --badge-ready-bg: #065F46;
+        --badge-ready-txt: #A7F3D0;
+        --badge-tracking-bg: #1E3A8A;
+        --badge-tracking-txt: #BFDBFE;
+        --badge-lost-bg: #7F1D1D;
+        --badge-lost-txt: #FCA5A5;
+        --badge-complete-bg: #14532D;
+        --badge-complete-txt: #86EFAC;
+        --tab-inactive-txt: #9CA3AF;
+        --tab-active-txt: #3B82F6;
+        --tab-border: #1F293D;
+    }
+
+    /* Streamlit explicit Light theme toggle */
+    [data-theme="light"], body.light, [data-testid="stAppViewContainer"][data-theme="light"] {
+        --bg-app: #FAFAFA;
+        --text-main: #0F172A;
+        --text-sub: #475569;
+        --card-bg: #FFFFFF;
+        --card-border: #CBD5E1;
+        --card-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+        --player-bg: #F1F5F9;
+        --player-border: #CBD5E1;
+        --badge-idle-bg: #E2E8F0;
+        --badge-idle-txt: #1E293B;
+        --badge-ready-bg: #DCFCE7;
+        --badge-ready-txt: #14532D;
+        --badge-tracking-bg: #DBEAFE;
+        --badge-tracking-txt: #1E40AF;
+        --badge-lost-bg: #FEE2E2;
+        --badge-lost-txt: #991B1B;
+        --badge-complete-bg: #DCFCE7;
+        --badge-complete-txt: #15803D;
+        --tab-inactive-txt: #475569;
+        --tab-active-txt: #2563EB;
+        --tab-border: #CBD5E1;
+    }
+
     html, body, [data-testid="stAppViewContainer"] {
         font-family: 'Inter', system-ui, sans-serif;
-        background-color: #0B0F17;
-        color: #F3F4F6;
     }
     
     .app-header {
         font-size: 32px;
         font-weight: 700;
-        color: #FFFFFF;
+        color: var(--text-main);
         margin-bottom: 8px;
         letter-spacing: -0.025em;
     }
     .app-subheader {
         font-size: 15px;
-        color: #9CA3AF;
+        color: var(--text-sub);
         margin-bottom: 24px;
     }
     
     .premium-card {
-        background-color: #161B26;
-        border: 1px solid #232D3F;
+        background-color: var(--card-bg);
+        border: 1px solid var(--card-border);
         border-radius: 12px;
         padding: 24px;
         margin-bottom: 20px;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        box-shadow: var(--card-shadow);
+        color: var(--text-main);
     }
     
     .player-shell {
-        background-color: #0F131E;
-        border: 1px solid #1F293D;
+        background-color: var(--player-bg);
+        border: 1px solid var(--player-border);
         border-radius: 12px;
         padding: 16px;
         margin-bottom: 12px;
-        box-shadow: inset 0 2px 4px 0 rgba(0, 0, 0, 0.2);
     }
     .player-time {
-        color: #9CA3AF;
+        color: var(--text-sub);
         font-family: 'Inter', monospace;
         font-size: 13px;
         margin-top: 8px;
     }
     
     div[data-baseweb="tab-list"] {
-        border-bottom: 1px solid #1F293D;
+        border-bottom: 1px solid var(--tab-border);
         gap: 8px;
     }
     button[data-baseweb="tab"] {
-        color: #9CA3AF;
+        color: var(--tab-inactive-txt);
         font-weight: 500;
         padding: 12px 16px;
         border-radius: 6px 6px 0 0;
         transition: all 0.2s ease;
     }
     button[data-baseweb="tab"][aria-selected="true"] {
-        color: #4F46E5 !important;
-        border-bottom: 2px solid #4F46E5 !important;
+        color: var(--tab-active-txt) !important;
+        border-bottom: 2px solid var(--tab-active-txt) !important;
     }
     
     #MainMenu {visibility: hidden;}
@@ -133,6 +233,16 @@ st.markdown(
         font-weight: 500 !important;
         transition: all 0.2s ease !important;
     }
+
+    button[kind="secondary"], .stButton>button[data-testid="baseButton-secondary"] {
+        background-color: var(--card-bg) !important;
+        color: var(--text-main) !important;
+        border: 1px solid var(--card-border) !important;
+    }
+    button[kind="secondary"]:hover, .stButton>button[data-testid="baseButton-secondary"]:hover {
+        background-color: var(--player-bg) !important;
+        border-color: var(--tab-active-txt) !important;
+    }
     
     .status-badge {
         display: inline-block;
@@ -143,11 +253,11 @@ st.markdown(
         text-transform: uppercase;
         margin-top: 4px;
     }
-    .status-idle { background-color: #374151; color: #D1D5DB; }
-    .status-ready { background-color: #065F46; color: #A7F3D0; }
-    .status-tracking { background-color: #1E3A8A; color: #BFDBFE; }
-    .status-lost { background-color: #7F1D1D; color: #FCA5A5; }
-    .status-complete { background-color: #14532D; color: #86EFAC; }
+    .status-idle { background-color: var(--badge-idle-bg); color: var(--badge-idle-txt); }
+    .status-ready { background-color: var(--badge-ready-bg); color: var(--badge-ready-txt); }
+    .status-tracking { background-color: var(--badge-tracking-bg); color: var(--badge-tracking-txt); }
+    .status-lost { background-color: var(--badge-lost-bg); color: var(--badge-lost-txt); }
+    .status-complete { background-color: var(--badge-complete-bg); color: var(--badge-complete-txt); }
 </style>
 """,
     unsafe_allow_html=True,
@@ -1329,7 +1439,7 @@ elif st.session_state.tab == "calibrate":
         st.warning("Please setup a video in Video Setup first.")
         st.stop()
 
-    with st.expander("🛠️ Metadata & Arena Settings", expanded=True):
+    with st.expander("🛠️ Metadata & Arena Settings (Optional)", expanded=False):
         mc1, mc2, mc3 = st.columns(3)
         st.session_state.meta_bid = mc1.text_input("Bee ID (BID)", value=st.session_state.meta_bid)
         st.session_state.meta_cue = mc2.text_input("CUE", value=st.session_state.meta_cue)
@@ -1392,20 +1502,17 @@ elif st.session_state.tab == "calibrate":
     ch = int(oh * CANVAS_W / ow)
     ratio = ow / CANVAS_W
     
-    # If already calibrated, render the overlay directly on the canvas background
+    oh, ow = frame0.shape[:2]
+    ch = int(oh * CANVAS_W / ow)
+    ratio = ow / CANVAS_W
+    
+    # Always pass clean un-overlayed raw frame to canvas for clear point clicking
     bg_frame = frame0.copy()
-    if st.session_state.circle_center is not None and st.session_state.circle_radius is not None:
-        bg_frame = draw_calibration_overlay(
-            bg_frame,
-            st.session_state.circle_center[0],
-            st.session_state.circle_center[1],
-            st.session_state.circle_radius,
-            st.session_state.active_slot
-        )
-        
     pil = Image.fromarray(cv2.cvtColor(cv2.resize(bg_frame, (CANVAS_W, ch)), cv2.COLOR_BGR2RGB))
 
-    # Single-slot active calibration canvas to avoid mixing coordinates
+    calib_ver = st.session_state.get(f"calib_version_{st.session_state.active_slot}", 0)
+
+    # Single-slot active calibration canvas with dynamic version key
     result = st_canvas(
         fill_color="rgba(0, 255, 255, 0.4)",
         stroke_width=2,
@@ -1415,7 +1522,7 @@ elif st.session_state.tab == "calibrate":
         height=ch,
         width=CANVAS_W,
         drawing_mode="point",
-        key=f"calib_canvas_slot_{st.session_state.active_slot}",
+        key=f"calib_canvas_slot_{st.session_state.active_slot}_v{calib_ver}",
     )
 
     num_clicked = 0
@@ -1425,6 +1532,19 @@ elif st.session_state.tab == "calibrate":
                 num_clicked += 1
 
     st.markdown(f"**Points clicked:** `{num_clicked} / 9`")
+
+    if num_clicked == 0:
+        st.info("📍 **Step 1:** Click 4 points along the **outer rim** of the arena circle.")
+    elif num_clicked < 4:
+        st.info(f"📍 **Step 1 (Outer Rim):** `{num_clicked} / 4` points clicked. Keep clicking along outer rim.")
+    elif num_clicked == 4:
+        st.info("📍 **Step 2:** Click 4 points along the **inner rim** of the arena circle.")
+    elif num_clicked < 8:
+        st.info(f"📍 **Step 2 (Inner Rim):** `{num_clicked - 4} / 4` points clicked. Keep clicking along inner rim.")
+    elif num_clicked == 8:
+        st.info("📍 **Step 3:** Click 1 final point at the **hive entry** location.")
+    elif num_clicked >= 9:
+        st.success("✅ **9 points clicked!** Fitting arena circles and generating preview...")
 
     orig = []
     if result.json_data:
@@ -1483,6 +1603,7 @@ elif st.session_state.tab == "calibrate":
                     st.rerun()
             with bcol2:
                 if st.button("↺ Reset Calibration Points", key=f"reset_calib_{st.session_state.active_slot}"):
+                    st.session_state[f"calib_version_{st.session_state.active_slot}"] = calib_ver + 1
                     st.session_state.calibration_points = None
                     st.session_state.circle_center = None
                     st.session_state.circle_radius = None
@@ -2199,23 +2320,41 @@ elif st.session_state.tab == "analysis":
     fig = plot_trajectory(df, st.session_state.entry_frame, st.session_state.exit_frame, title=heading, bee_id=bee_id, outcome=outcome_str, hive_entry_mm=hive_entry_mm, orientation=orientation, p_val=p_val, u_val=u_val, dop=xdop)
     st.pyplot(fig)
 
-    # 4. Trial Outcome Question
+    # 4. Trial Metadata & Outcome Question
     st.markdown("---")
-    st.markdown("### Trial Outcome")
-    st.markdown("**Did the bee return to the feeder / go back or is it still in the arena?**")
+    st.markdown('<div class="premium-card">', unsafe_allow_html=True)
+    st.markdown("### 📝 Session Metadata & Trial Outcome Verification")
+    st.caption("Confirm or update experimental conditions before downloading session files and plots:")
+
+    mc1, mc2, mc3 = st.columns(3)
+    new_bid = mc1.text_input("Bee ID (BID)", value=st.session_state.meta_bid if st.session_state.meta_bid else bee_id, key=f"meta_bid_input_{st.session_state.active_slot}")
+    new_cue = mc2.text_input("CUE", value=st.session_state.meta_cue if st.session_state.meta_cue else orientation, key=f"meta_cue_input_{st.session_state.active_slot}")
+    new_p = mc3.text_input("P value", value=st.session_state.meta_p if st.session_state.meta_p else p_val, key=f"meta_p_input_{st.session_state.active_slot}")
+    new_u = mc1.text_input("u value", value=st.session_state.meta_u if st.session_state.meta_u else u_val, key=f"meta_u_input_{st.session_state.active_slot}")
+    new_dop = mc2.text_input("Dop value", value=st.session_state.meta_dop if st.session_state.meta_dop else xdop, key=f"meta_dop_input_{st.session_state.active_slot}")
+
+    if new_bid != st.session_state.meta_bid or new_cue != st.session_state.meta_cue or new_p != st.session_state.meta_p or new_u != st.session_state.meta_u or new_dop != st.session_state.meta_dop:
+        st.session_state.meta_bid = new_bid
+        st.session_state.meta_cue = new_cue
+        st.session_state.meta_p = new_p
+        st.session_state.meta_u = new_u
+        st.session_state.meta_dop = new_dop
+        sync_flat_to_active_slot()
+
+    st.markdown("**Trial Outcome:** Did the bee return to the feeder / go back or is it still in the arena?")
     col_out1, col_out2, col_out3 = st.columns(3)
     with col_out1:
-        if st.button("🟢 Yes, the bee went back", width="stretch"):
+        if st.button("🟢 Yes, the bee went back", width="stretch", key=f"btn_went_back_yes_{st.session_state.active_slot}"):
             st.session_state.bee_went_back = True
             sync_flat_to_active_slot()
             st.rerun()
     with col_out2:
-        if st.button("🔴 No, still in arena", width="stretch"):
+        if st.button("🔴 No, still in arena", width="stretch", key=f"btn_went_back_no_{st.session_state.active_slot}"):
             st.session_state.bee_went_back = False
             sync_flat_to_active_slot()
             st.rerun()
     with col_out3:
-        if st.button("⚪ Unknown", width="stretch"):
+        if st.button("⚪ Unknown", width="stretch", key=f"btn_went_back_unk_{st.session_state.active_slot}"):
             st.session_state.bee_went_back = "unknown"
             sync_flat_to_active_slot()
             st.rerun()
@@ -2226,6 +2365,7 @@ elif st.session_state.tab == "analysis":
         st.error("🔴 Warning: Bee remained in the arena.")
     else:
         st.info("⚪ Outcome: Unknown (unspecified outcome).")
+    st.markdown('</div>', unsafe_allow_html=True)
 
     # 5. Export Files & Create ZIP
     res_base_dir = st.session_state.results_dir if st.session_state.results_dir else "results"

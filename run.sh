@@ -13,18 +13,22 @@ echo "================================================="
 echo "          🐝 BEE ARENA TRACKER LAUNCHER          "
 echo "================================================="
 echo "How would you like to run the application?"
-echo "  [1] Locally (Python virtualenv)"
-echo "  [2] Docker (Containerized)"
+echo "  [1] Launch Locally (Use existing .venv if healthy)"
+echo "  [2] Fresh Reinstall Environment (Remove & recreate .venv)"
+echo "  [3] Docker Containerized"
 echo "================================================="
-read -p "Select option (1 or 2) [Default: 1]: " CHOICE
+read -p "Select option (1, 2, or 3) [Default: 1]: " CHOICE
 
 CHOICE=${CHOICE:-1}
 
-if [ "$CHOICE" == "2" ]; then
+if [ "$1" == "--clean" ] || [ "$1" == "clean" ]; then
+    CHOICE="2"
+fi
+
+if [ "$CHOICE" == "3" ]; then
     echo ""
     echo "=== Launching with Docker ==="
     
-    # Check if Docker is installed & running
     if ! command -v docker &>/dev/null; then
         echo "Error: Docker command not found. Please install Docker first."
         exit 1
@@ -60,6 +64,29 @@ elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]];
 fi
 echo "Detected OS: $OS_TYPE"
 
+# Check if clean reinstall requested
+if [ "$CHOICE" == "2" ]; then
+    echo "🧹 Removing existing .venv environment..."
+    rm -rf .venv
+fi
+
+# Test existing .venv python if present
+if [ -d ".venv" ]; then
+    VENV_PYTHON=""
+    if [ -f ".venv/bin/python" ]; then
+        VENV_PYTHON=".venv/bin/python"
+    elif [ -f ".venv/Scripts/python.exe" ]; then
+        VENV_PYTHON=".venv/Scripts/python.exe"
+    fi
+
+    if [ -n "$VENV_PYTHON" ]; then
+        if ! "$VENV_PYTHON" -c "import streamlit" &>/dev/null; then
+            echo "⚠️ Existing .venv appears broken or incomplete. Recreating fresh .venv..."
+            rm -rf .venv
+        fi
+    fi
+fi
+
 # Determine virtual environment activation path
 ACTIVATE_PATH=""
 if [ -d ".venv" ]; then
@@ -70,13 +97,8 @@ if [ -d ".venv" ]; then
     fi
 fi
 
-if [ -n "$VIRTUAL_ENV" ]; then
-    echo "Using currently active virtual environment: $VIRTUAL_ENV"
-elif [ -n "$ACTIVATE_PATH" ]; then
-    echo "Activating virtual environment: $ACTIVATE_PATH"
-    source "$ACTIVATE_PATH"
-else
-    echo "No .venv found. Checking Python/Pip..."
+if [ -z "$ACTIVATE_PATH" ]; then
+    echo "No valid .venv found. Checking Python..."
     if command -v python3 &>/dev/null; then
         PYTHON_CMD="python3"
     elif command -v python &>/dev/null; then
@@ -86,7 +108,7 @@ else
         exit 1
     fi
     
-    echo "Creating virtual environment using $PYTHON_CMD..."
+    echo "Creating fresh virtual environment using $PYTHON_CMD..."
     $PYTHON_CMD -m venv .venv
     
     if [ -f ".venv/bin/activate" ]; then
@@ -94,15 +116,16 @@ else
     elif [ -f ".venv/Scripts/activate" ]; then
         ACTIVATE_PATH=".venv/Scripts/activate"
     fi
-    
-    if [ -n "$ACTIVATE_PATH" ]; then
-        source "$ACTIVATE_PATH"
-    fi
+fi
+
+if [ -n "$ACTIVATE_PATH" ]; then
+    echo "Activating virtual environment: $ACTIVATE_PATH"
+    source "$ACTIVATE_PATH"
 fi
 
 if [ -f "requirements.txt" ]; then
-    echo "Checking dependencies..."
-    pip install -r requirements.txt --quiet
+    echo "Installing/verifying dependencies from requirements.txt..."
+    pip install -r requirements.txt
 fi
 
 echo "Launching Streamlit application..."

@@ -1,0 +1,16 @@
+[theme]
+primaryColor = "#2563eb"
+font = "sans-serif"
+showWidgetBorder = true
+
+[theme.light]
+primaryColor = "#2563eb"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f8fafc"
+textColor = "#0f172a"
+
+[theme.dark]
+primaryColor = "#3b82f6"
+backgroundColor = "#0b0f17"
+secondaryBackgroundColor = "#161b26"
+textColor = "#f8fafc"
