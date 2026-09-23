@@ -1502,12 +1502,13 @@ elif st.session_state.tab == "calibrate":
     ch = int(oh * CANVAS_W / ow)
     ratio = ow / CANVAS_W
     
-    oh, ow = frame0.shape[:2]
-    ch = int(oh * CANVAS_W / ow)
-    ratio = ow / CANVAS_W
-    
-    # Always pass clean un-overlayed raw frame to canvas for clear point clicking
+    # Pass raw or fitted overlay frame to canvas
     bg_frame = frame0.copy()
+    if st.session_state.get("circle_center") and st.session_state.get("circle_radius"):
+        xc_o, yc_o = st.session_state.circle_center
+        r_o = st.session_state.circle_radius
+        bg_frame = draw_calibration_overlay(frame0, xc_o, yc_o, r_o, st.session_state.active_slot)
+
     pil = Image.fromarray(cv2.cvtColor(cv2.resize(bg_frame, (CANVAS_W, ch)), cv2.COLOR_BGR2RGB))
 
     calib_ver = st.session_state.get(f"calib_version_{st.session_state.active_slot}", 0)
@@ -1555,7 +1556,7 @@ elif st.session_state.tab == "calibrate":
     elif num_clicked == 8:
         st.info("📍 **Step 3:** Click 1 final point at the **hive entry** location.")
     elif num_clicked >= 9:
-        st.success("✅ **9 points clicked!** Fitting arena circles and generating preview...")
+        st.success("✅ **9 points clicked!** Arena circles fitted on canvas.")
 
     if len(orig) >= 9:
         st.session_state.calibration_points = orig[:9]
@@ -1585,9 +1586,6 @@ elif st.session_state.tab == "calibrate":
             
             # Immediately persist fitted calibration values into the active slot state dictionary
             sync_flat_to_active_slot()
-
-            overlay = draw_calibration_overlay(frame0, xc_o, yc_o, r_o, st.session_state.active_slot)
-            st.image(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB), caption="Fitted Calibration Overlay Preview")
 
             bcol1, bcol2 = st.columns(2)
             with bcol1:
@@ -1772,7 +1770,7 @@ elif st.session_state.tab == "track":
     )
 
     # --- Inject keyboard shortcut Shift+D ---
-    st.components.v1.html(
+    st.html(
         """
         <script>
         const doc = window.parent.document;
@@ -1791,8 +1789,7 @@ elif st.session_state.tab == "track":
         }
         </script>
         """,
-        height=0,
-        width=0,
+        unsafe_allow_javascript=True,
     )
 
     stride = int(st.session_state.get("track_stride", 1))

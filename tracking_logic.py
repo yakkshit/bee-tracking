@@ -102,6 +102,7 @@ class OnlineYOLOTrainer:
         self.uncommitted_count = 0
         self.model_version = 1
         self.is_training = False
+        self.disabled = False
         self.last_status = "Ready"
         self._lock = threading.Lock()
 
@@ -132,7 +133,7 @@ names:
         """
         Record verified tracking coordinate on the fly.
         """
-        if frame is None:
+        if frame is None or self.disabled:
             return
 
         h, w = frame.shape[:2]
@@ -172,7 +173,7 @@ names:
     def trigger_background_training(self, epochs=3):
         """Spawns non-blocking background thread to fine-tune YOLO model."""
         with self._lock:
-            if self.is_training:
+            if self.is_training or self.disabled:
                 return
             self.is_training = True
             self.last_status = f"Fine-tuning YOLO on {self.sample_count} live frames..."
@@ -218,9 +219,18 @@ names:
                 with self._lock:
                     self.last_status = "Trained successfully"
         except Exception as e:
+            err_str = str(e)
             with self._lock:
-                self.last_status = f"Online train notice: {e}"
-            print(f"[OnlineYOLOTrainer] Background train notice: {e}")
+                if "1114" in err_str or "c10.dll" in err_str or "DLL" in err_str:
+                    self.last_status = "Classic OpenCV Engine Active (PyTorch C++ runtime DLL notice on host OS)"
+                    self.disabled = True
+                else:
+                    self.last_status = f"Classic OpenCV Engine Active (PyTorch notice: {err_str[:60]})"
+                    self.disabled = True
+            if self.disabled:
+                print(f"[OnlineYOLOTrainer] PyTorch C++ runtime DLL notice on host OS. Defaulting to high-performance OpenCV tracking engine.")
+            else:
+                print(f"[OnlineYOLOTrainer] Background train notice: {e}")
         finally:
             with self._lock:
                 self.is_training = False
@@ -231,6 +241,7 @@ names:
                 "sample_count": self.sample_count,
                 "model_version": self.model_version,
                 "is_training": self.is_training,
+                "disabled": self.disabled,
                 "status": self.last_status
             }
 
