@@ -1522,14 +1522,25 @@ elif st.session_state.tab == "calibrate":
         height=ch,
         width=CANVAS_W,
         drawing_mode="point",
+        point_display_radius=8,
         key=f"calib_canvas_slot_{st.session_state.active_slot}_v{calib_ver}",
     )
 
     num_clicked = 0
+    orig = []
     if result.json_data:
+        pts = []
         for obj in result.json_data.get("objects", []):
-            if obj.get("type") == "circle":
-                num_clicked += 1
+            r = obj.get("radius", 0)
+            left = obj.get("left", 0)
+            top = obj.get("top", 0)
+            w = obj.get("width", 0)
+            h = obj.get("height", 0)
+            cx = left + (r if r > 0 else w / 2.0 if w > 0 else 0)
+            cy = top + (r if r > 0 else h / 2.0 if h > 0 else 0)
+            pts.append((cx, cy))
+            num_clicked += 1
+        orig = [(p[0] * ratio, p[1] * ratio) for p in pts]
 
     st.markdown(f"**Points clicked:** `{num_clicked} / 9`")
 
@@ -1545,15 +1556,6 @@ elif st.session_state.tab == "calibrate":
         st.info("📍 **Step 3:** Click 1 final point at the **hive entry** location.")
     elif num_clicked >= 9:
         st.success("✅ **9 points clicked!** Fitting arena circles and generating preview...")
-
-    orig = []
-    if result.json_data:
-        pts = []
-        for obj in result.json_data.get("objects", []):
-            if obj.get("type") == "circle":
-                r = obj.get("radius", 0)
-                pts.append((obj["left"] + r, obj["top"] + r))
-        orig = [(p[0] * ratio, p[1] * ratio) for p in pts]
 
     if len(orig) >= 9:
         st.session_state.calibration_points = orig[:9]
@@ -1889,16 +1891,19 @@ elif st.session_state.tab == "track":
                 )
                 if canvas.json_data:
                     for obj in canvas.json_data.get("objects", []):
-                        if obj.get("type") == "circle":
-                            r = obj.get("radius", 0)
-                            cx_c = (obj["left"] + r) * ratio
-                            cy_c = (obj["top"] + r) * ratio
-                            apply_point_tag(cx_c, cy_c, st.session_state.tag_mode, frame, slot_fps, i)
-                            st.session_state.tag_mode = None
-                            if slot["track_phase"] == "complete" and num_slots == 1:
-                                st.session_state.tab = "analysis"
-                            sync_active_slot_to_flat()
-                            st.rerun()
+                        r = obj.get("radius", 0)
+                        left = obj.get("left", 0)
+                        top = obj.get("top", 0)
+                        w = obj.get("width", 0)
+                        h = obj.get("height", 0)
+                        cx_c = (left + (r if r > 0 else w / 2.0 if w > 0 else 0)) * ratio
+                        cy_c = (top + (r if r > 0 else h / 2.0 if h > 0 else 0)) * ratio
+                        apply_point_tag(cx_c, cy_c, st.session_state.tag_mode, frame, slot_fps, i)
+                        st.session_state.tag_mode = None
+                        if slot["track_phase"] == "complete" and num_slots == 1:
+                            st.session_state.tab = "analysis"
+                        sync_active_slot_to_flat()
+                        st.rerun()
             else:
                 st.image(vis_rgb)
 
