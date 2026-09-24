@@ -179,10 +179,8 @@ names:
                 self.sample_count += 1
                 self.uncommitted_count += 1
 
-            # Trigger training if threshold reached or if priority tag (help/entry tag)
-            batch_threshold = 20 if not priority else 5
-            if self.uncommitted_count >= batch_threshold and not self.is_training:
-                self.trigger_background_training()
+            # Background fine-tuning is deferred to explicit user trigger (e.g. Fine-Tune button)
+            # to prevent CPU thread starvation and UI freezing on laptops.
         except Exception as e:
             print(f"[OnlineYOLOTrainer] Sample save error: {e}")
 
