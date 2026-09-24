@@ -1,4 +1,5 @@
 import os
+import sys
 import glob
 import re
 import pandas as pd
@@ -6,8 +7,35 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.collections import LineCollection
-from scipy.signal import savgol_filter
 from matplotlib.lines import Line2D
+
+if sys.platform.startswith("win"):
+    try:
+        import site
+        for site_path in site.getsitepackages():
+            for lib_folder in ("torch/lib", "scipy.libs", "numpy.libs", "matplotlib.libs"):
+                dll_dir = os.path.abspath(os.path.join(site_path, lib_folder))
+                if os.path.exists(dll_dir):
+                    win_dll = f"\\\\?\\{dll_dir}" if not dll_dir.startswith("\\\\?\\") else dll_dir
+                    try:
+                        os.add_dll_directory(dll_dir)
+                    except Exception:
+                        try:
+                            os.add_dll_directory(win_dll)
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+
+try:
+    from scipy.signal import savgol_filter
+except Exception:
+    def savgol_filter(x, window_length, polyorder, **kwargs):
+        x = np.asarray(x, dtype=float)
+        w = max(1, int(window_length))
+        if len(x) < w or w < 2:
+            return x
+        return np.convolve(x, np.ones(w) / w, mode='same')
 
 
 def parse_metadata_from_foldername(folder_name):

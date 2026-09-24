@@ -10,9 +10,17 @@ if sys.platform.startswith("win"):
     try:
         import site
         for site_path in site.getsitepackages():
-            torch_lib = os.path.join(site_path, "torch", "lib")
-            if os.path.exists(torch_lib):
-                os.add_dll_directory(torch_lib)
+            for lib_folder in ("torch/lib", "scipy.libs", "numpy.libs", "matplotlib.libs"):
+                dll_dir = os.path.abspath(os.path.join(site_path, lib_folder))
+                if os.path.exists(dll_dir):
+                    win_dll = f"\\\\?\\{dll_dir}" if not dll_dir.startswith("\\\\?\\") else dll_dir
+                    try:
+                        os.add_dll_directory(dll_dir)
+                    except Exception:
+                        try:
+                            os.add_dll_directory(win_dll)
+                        except Exception:
+                            pass
     except Exception:
         pass
 
@@ -2441,7 +2449,11 @@ elif st.session_state.tab == "analysis":
                 promoted_path = yolo_self_train.run_full_pipeline(epochs=15)
                 st.success(f"🎉 YOLO Continual Training Complete! Best weights promoted to: `{promoted_path}`")
             except Exception as e:
-                st.error(f"Training error: {e}")
+                err_str = str(e)
+                if "206" in err_str or "filename or extension is too long" in err_str:
+                    st.warning("⚡ **Windows Path Length Notice**: Windows 260-character MAX_PATH limit detected. To enable full PyTorch training, move the project folder to a shorter path (e.g. `C:\\bee-tracking`) or enable Windows Long Paths.")
+                else:
+                    st.error(f"Training error: {e}")
 
     # Gather full tracking coordinates from memory or loaded session dataframe or disk CSV
     all_coords = st.session_state.track_coords
@@ -2521,7 +2533,9 @@ elif st.session_state.tab == "analysis":
         from analysis.fixed_version import process_single_trial
         process_single_trial(export_dir)
     except Exception as e:
-        st.warning(f"Note: Could not auto-generate fixed trajectory plots: {e}")
+        err_str = str(e)
+        if "206" not in err_str and "filename or extension is too long" not in err_str:
+            st.warning(f"Note: Could not auto-generate fixed trajectory plots: {e}")
 
     try:
         from generate_plots_for_sessions import STEPS

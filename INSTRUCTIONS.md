@@ -69,8 +69,14 @@ Follow these steps to run the software on a Windows laptop or desktop:
 
 ### **Step 2: Navigate to Project Directory**
 Change directory to the project folder:
-```cmd
-cd C:\Users\YourUsername\Downloads\bee-tracking
+copy the path and 
+```
+cd paste the copied path here
+
+```
+it should look some thing like this 
+```
+cd "C:\user path\p1\Videos\BBP2025\working"
 ```
 
 ### **Step 3: Check Python Environment**
@@ -162,14 +168,22 @@ Once tracking is complete, switch to **Tab 4 (Analysis)**:
 - **Cause**: On some laptops, background PyTorch model training spammed CPU thread pools during interactive tagging.
 - **Fix**: Automatic background PyTorch training has been isolated. Help tag clicks now execute instant (0 ms) OpenCV re-acquisition without thread locking. If you wish to fine-tune YOLO models, use the dedicated **"🚀 Fine-Tune YOLO Model"** button in Tab 4.
 
-### ❓ **Windows DLL Initialization Error (`c10.dll` / `WinError 1114`)**
+### 3. ❓ **Windows Path Length Error (`[WinError 206] The filename or extension is too long`)**
+- **Cause**: Windows legacy limits file path lengths to 260 characters (`MAX_PATH`). When the project is stored inside deep nested folders (e.g. `C:\Users\Name\Downloads\Folder\Subfolder\bee-tracking\.venv\Lib\site-packages\torch\lib`), Windows blocks C-extension DLL loading.
+- **Fix (Option A - Recommended)**: Move or copy the project folder to a shorter path (e.g., `C:\bee-tracking` or `D:\bee-tracking`).
+- **Fix (Option B)**: Enable Windows 10/11 Long Paths:
+  1. Press `Win + R`, type `regedit` and press `Enter`.
+  2. Navigate to: `HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\FileSystem`
+  3. Set `LongPathsEnabled` to `1`.
+
+### 4. ❓ **Windows DLL Initialization Error (`c10.dll` / `WinError 1114`)**
 - **Cause**: Missing Microsoft Visual C++ Redistributable on Windows.
 - **Fix**:
   1. Download and install **Visual C++ Redistributable 2015–2022** from Microsoft:  
      👉 [https://aka.ms/vs/17/release/vc_redist.x64.exe](https://aka.ms/vs/17/release/vc_redist.x64.exe)
   2. Launch `run.bat` and select **Option 2** (Clean Reinstall Environment).
 
-### ❓ **Camera Feed Warning in macOS Terminal**
+### 5. ❓ **Camera Feed Warning in macOS Terminal**
 - **Notice**: `AVCaptureDeviceTypeExternal is deprecated for Continuity Cameras`.
 - **Explanation**: This is a harmless system log notice from macOS AVFoundation. OpenCV logging levels have been set to `OFF` in `app.py` to prevent stdout clutter.
 
