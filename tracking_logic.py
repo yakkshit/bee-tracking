@@ -1,4 +1,20 @@
 import os
+import sys
+
+# Windows DLL loading and OpenMP safety configuration
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["OMP_NUM_THREADS"] = "1"
+
+if sys.platform.startswith("win"):
+    try:
+        import site
+        for site_path in site.getsitepackages():
+            torch_lib = os.path.join(site_path, "torch", "lib")
+            if os.path.exists(torch_lib):
+                os.add_dll_directory(torch_lib)
+    except Exception:
+        pass
+
 import cv2
 import time
 import shutil

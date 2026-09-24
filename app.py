@@ -1,3 +1,21 @@
+import os
+import sys
+
+# Suppress noisy OpenCV backend warnings & setup safety flags
+os.environ["OPENCV_LOG_LEVEL"] = "OFF"
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["OMP_NUM_THREADS"] = "1"
+
+if sys.platform.startswith("win"):
+    try:
+        import site
+        for site_path in site.getsitepackages():
+            torch_lib = os.path.join(site_path, "torch", "lib")
+            if os.path.exists(torch_lib):
+                os.add_dll_directory(torch_lib)
+    except Exception:
+        pass
+
 # Streamlit compatibility patch for streamlit_drawable_canvas
 import streamlit.elements.image as st_image
 
@@ -898,6 +916,16 @@ def fmt_time(frame, fps):
     return f"{m}:{s:02d}"
 
 
+_CAP_HANDLES = {}
+
+def get_cap_handle(path):
+    if path == "live":
+        cam_idx = st.session_state.get("camera_index", 0)
+        return get_live_camera(cam_idx)
+    if path not in _CAP_HANDLES or not _CAP_HANDLES[path].isOpened():
+        _CAP_HANDLES[path] = cv2.VideoCapture(path)
+    return _CAP_HANDLES[path]
+
 @st.cache_resource
 def get_live_camera(cam_idx):
     if os.name == 'nt':
@@ -905,19 +933,26 @@ def get_live_camera(cam_idx):
     return cv2.VideoCapture(cam_idx)
 
 def read_frame(video_path, frame_idx):
+    if not video_path:
+        return False, None
     if video_path == "live":
-        cam_idx = st.session_state.get("camera_index", 0)
-        cap = get_live_camera(cam_idx)
+        cap = get_cap_handle("live")
         ok, frame = cap.read()
         return ok, frame
-    cap = cv2.VideoCapture(video_path)
+    cap = get_cap_handle(video_path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
     ok, frame = cap.read()
-    cap.release()
+    if not ok:
+        cap.open(video_path)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ok, frame = cap.read()
     return ok, frame
 
 
+@st.cache_data
 def video_meta(video_path):
+    if not video_path:
+        return {"w": 640, "h": 480, "fps": 30.0, "frames": 1}
     if video_path == "live":
         return {
             "w": 640,
