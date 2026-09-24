@@ -136,18 +136,29 @@ Click **"Next: Start tracking room →"**.
 ---
 
 ### Step 3: Tracking & Tagging Room
-The tracking room displays interactive video controls and manual tagging tools:
+The tracking room displays interactive video controls, full arena auto-tracking, and manual tagging tools:
 
-#### **Tagging Buttons**:
-- 🟢 **Entry tag**: Click on the bee's exact location in frame 0 (or entry frame). Tracking starts automatically from this point.
-- 🟡 **Help tag**: If the bee is hidden, flies fast, or tracker loses focus, pause or scrub to that frame, select **"Help tag"**, and click directly on the bee to re-acquire instant high-precision tracking.
-- 🔴 **Exit tag**: Click where the bee exits the arena.
-- ⏹ **End tag**: Terminate analysis tracking boundary.
+#### **🎯 Full Arena Auto-Tracking Mode (Toggle)**:
+- Enable **"🎯 Auto-Track Full Arena"** in `⚙️ Tracking Config`:
+  - Automatically detects and tracks the bee across the entire arena right away on live feeds or recorded videos without requiring an initial Entry tag first.
+  - Users can retroactively set an **Entry tag**, **Exit tag**, or **End tag** at any frame afterwards.
 
-#### **Playback & Navigation**:
-- **Play / Pause (▶ / ⏸)**: Start or stop automatic multi-frame tracking.
-- **Frame Stepping (⏮ / ◀ / ▶▶)**: Step frame-by-frame or 5 seconds backward/forward.
-- **Keyboard Shortcut**: Press `Shift + D` on your keyboard to step forward 1 stride.
+#### **🏷️ Manual Tagging Tools**:
+- 🟢 **Entry tag** (`E` key): Mark where the bee enters the arena.
+- 🟡 **Help tag** (`H` key): If the bee is hidden, flies fast, or tracker loses focus, press `H` (or click Help tag) and click directly on the bee to re-acquire instant 0-ms tracking.
+- 🔴 **Exit tag** (`X` key): Mark where the bee exits the arena.
+- ⏹ **End tag** (`S` key): Terminate analysis tracking boundary.
+
+#### **⌨️ Cross-Platform Keyboard Shortcuts (Mac & Windows)**:
+| Action | Key / Hotkey | Description |
+| :--- | :--- | :--- |
+| **Play / Pause** | `Spacebar` | Start or pause video playback / live tracking |
+| **Entry Tag** | `E` | Activate Entry tag mode |
+| **Help Tag** | `H` | Activate Help tag mode (re-acquire bee) |
+| **Exit Tag** | `X` | Activate Exit tag mode |
+| **End Tag** | `S` | Activate End tag mode |
+| **Step Backward** | `Cmd + ◀` / `Ctrl + ◀` / `◀` | Step backward 1 stride / 5 seconds |
+| **Step Forward** | `Cmd + ▶` / `Ctrl + ▶` / `▶` / `Shift + D` | Step forward 1 stride / 5 seconds |
 
 ---
 

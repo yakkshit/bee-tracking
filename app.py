@@ -1030,7 +1030,31 @@ def apply_point_tag(px, py, tag_mode, frame, fps, slot_idx=0):
 def process_tracking_frame(frame, frame_idx, fps, settings, slot_idx=0):
     slot = st.session_state.slots[slot_idx]
     if slot["track_state"] is None:
-        return False
+        if st.session_state.get("auto_track_full_arena", True) and slot.get("circle_center") and slot.get("circle_radius"):
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            xc, yc = slot["circle_center"]
+            r_px = slot["circle_radius"]
+            scale = slot.get("scale_factor", 1.0)
+            exclude_px = slot.get("feeder_radius_mm", 40.0) / scale if scale else 30.0
+            spot = find_darkest_in_arena(gray, xc, yc, r_px, exclude_center_px=exclude_px)
+            if spot is None:
+                yolo_det = get_yolo_detector()
+                yolo_res = yolo_det.detect_bee(frame, conf_threshold=0.15, use_clahe=st.session_state.get("apply_clahe", True))
+                if yolo_res:
+                    ycx, ycy, yw, yh, _ = yolo_res
+                    spot = (ycx, ycy)
+            if spot:
+                bbox = point_to_bbox(spot[0], spot[1], frame.shape)
+                slot["track_state"] = init_track_state(frame, bbox, slot_idx)
+                slot["track_state"]["frame_idx"] = frame_idx
+                upsert_coord(make_coord(frame_idx, spot[0], spot[1], fps, slot_idx, tag_type="auto", status="ok"), slot_idx)
+                slot["track_phase"] = "tracking"
+                slot["tracking_lost"] = False
+            else:
+                return False
+        else:
+            return False
+
     state = slot["track_state"].copy()
     state["frame_idx"] = frame_idx
     center, _, status, new_state = track_single_frame(frame, state, settings, slot_idx)
@@ -1075,6 +1099,7 @@ DEFAULTS = {
     "calibration_points": None,
     "scale_factor": None,
     "tracking_fps": 30.0,
+    "auto_track_full_arena": True,
     "apply_clahe": True,
     "clahe_clip": 3.0,
     "clahe_grid": 8,
@@ -1785,8 +1810,8 @@ elif st.session_state.tab == "track":
             sync_active_slot_to_flat()
             st.rerun()
 
-    with st.expander("⚙️ Tracking Config", expanded=False):
-        c_tr1, c_tr2 = st.columns(2)
+    with st.expander("⚙️ Tracking Config & Keyboard Hotkeys", expanded=False):
+        c_tr1, c_tr2, c_tr3 = st.columns(3)
         with c_tr1:
             st.session_state.track_stride = st.slider(
                 "Frame Stride",
@@ -1802,6 +1827,24 @@ elif st.session_state.tab == "track":
                 value=st.session_state.get("apply_clahe", True),
                 help="Applies Contrast Limited Adaptive Histogram Equalization to remove center IR glare and boost dark bee detection."
             )
+        with c_tr3:
+            st.session_state.auto_track_full_arena = st.checkbox(
+                "🎯 Auto-Track Full Arena",
+                value=st.session_state.get("auto_track_full_arena", True),
+                help="Auto-detect and track bee across full arena on live or recorded feed without waiting for manual Entry tag first. Entry/Exit tags can be set retroactively."
+            )
+        
+        st.markdown("""
+        **⌨️ Active Keyboard Shortcuts (Mac & Windows):**
+        - **`Spacebar`**: Play / Pause player
+        - **`E`**: Activate **Entry tag**
+        - **`H`**: Activate **Help tag** (re-acquire bee)
+        - **`X`**: Activate **Exit tag**
+        - **`S`**: Activate **End tag**
+        - **`Cmd + ◀` / `Ctrl + ◀` / `◀`**: Step Backward
+        - **`Cmd + ▶` / `Ctrl + ▶` / `▶` / `Shift + D`**: Step Forward
+        """)
+
         if st.button("📦 Harvest Pre-Tracked Videos into YOLO Dataset", help="Scans all tracked session CSVs and generates a normalized YOLO dataset (bee_dataset.yaml)"):
             with st.spinner("Harvesting dataset from pre-tracked videos..."):
                 try:
@@ -1829,21 +1872,51 @@ elif st.session_state.tab == "track":
         f"`{tr_status['sample_count']}` live frames harvested & trained • Status: *{tr_status['status']}*"
     )
 
-    # --- Inject keyboard shortcut Shift+D ---
+    # --- Inject Keyboard Shortcuts Handler (Mac & Windows) ---
     st.html(
         """
         <script>
         const doc = window.parent.document;
-        if (!window.parent.hasShiftDShortcut) {
-            window.parent.hasShiftDShortcut = true;
+        if (!window.parent.hasBeeTrackerShortcuts) {
+            window.parent.hasBeeTrackerShortcuts = true;
             doc.addEventListener("keydown", function(e) {
-                if (e.shiftKey && (e.key === "D" || e.key === "d")) {
+                const activeEl = doc.activeElement;
+                if (activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA" || activeEl.isContentEditable)) {
+                    return;
+                }
+
+                const key = e.key;
+                const buttons = Array.from(doc.querySelectorAll("button"));
+                const findBtn = (text) => buttons.find(b => b.innerText && b.innerText.includes(text));
+
+                if (key === " " || key === "Spacebar") {
                     e.preventDefault();
-                    const buttons = Array.from(doc.querySelectorAll("button"));
-                    const stepBtn = buttons.find(btn => btn.innerText && btn.innerText.includes("▶▶"));
-                    if (stepBtn) {
-                        stepBtn.click();
-                    }
+                    const playBtn = findBtn("▶") || findBtn("⏸");
+                    if (playBtn) playBtn.click();
+                } else if ((key === "e" || key === "E") && !e.ctrlKey && !e.metaKey) {
+                    e.preventDefault();
+                    const btn = findBtn("Entry tag");
+                    if (btn) btn.click();
+                } else if ((key === "h" || key === "H") && !e.ctrlKey && !e.metaKey) {
+                    e.preventDefault();
+                    const btn = findBtn("Help tag");
+                    if (btn) btn.click();
+                } else if ((key === "x" || key === "X") && !e.ctrlKey && !e.metaKey) {
+                    e.preventDefault();
+                    const btn = findBtn("Exit tag");
+                    if (btn) btn.click();
+                } else if ((key === "s" || key === "S") && !e.ctrlKey && !e.metaKey) {
+                    e.preventDefault();
+                    const btn = findBtn("End tag");
+                    if (btn) btn.click();
+                } else if (key === "ArrowLeft") {
+                    e.preventDefault();
+                    const btn = (e.metaKey || e.ctrlKey) ? findBtn("⏮") : findBtn("◀");
+                    if (btn) btn.click();
+                } else if (key === "ArrowRight" || (e.shiftKey && (key === "D" || key === "d"))) {
+                    e.preventDefault();
+                    const btn = (e.metaKey || e.ctrlKey) ? findBtn("▶▶") : findBtn("▶▶");
+                    if (btn) btn.click();
                 }
             });
         }
