@@ -25,6 +25,58 @@ _YOLO_DETECTOR = None
 _ONLINE_TRAINER = None
 
 
+def preprocess_ir_frame(frame, clip_limit=2.5, tile_grid_size=(8, 8)):
+    """
+    Apply Contrast Limited Adaptive Histogram Equalization (CLAHE) to IR camera frames
+    to reduce center glare and boost dark bee contrast.
+    """
+    if frame is None:
+        return None
+    if len(frame.shape) == 3 and frame.shape[2] == 3:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = frame.copy()
+
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+    enhanced = clahe.apply(gray)
+
+    if len(frame.shape) == 3 and frame.shape[2] == 3:
+        return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+    return enhanced
+
+
+class KalmanBeeFilter:
+    """Lightweight 2D Constant-Velocity Kalman Filter for smooth bee motion tracking."""
+
+    def __init__(self):
+        self.kf = cv2.KalmanFilter(4, 2)
+        self.kf.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
+        self.kf.transitionMatrix = np.array(
+            [[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32
+        )
+        self.kf.processNoiseCov = np.eye(4, dtype=np.float32) * 1e-2
+        self.kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1e-1
+        self.initialized = False
+
+    def init(self, cx, cy):
+        self.kf.statePost = np.array([[np.float32(cx)], [np.float32(cy)], [0.0], [0.0]], np.float32)
+        self.initialized = True
+
+    def predict(self):
+        if not self.initialized:
+            return None
+        prediction = self.kf.predict()
+        return float(prediction[0][0]), float(prediction[1][0])
+
+    def correct(self, cx, cy):
+        if not self.initialized:
+            self.init(cx, cy)
+            return cx, cy
+        measurement = np.array([[np.float32(cx)], [np.float32(cy)]], np.float32)
+        corrected = self.kf.correct(measurement)
+        return float(corrected[0][0]), float(corrected[1][0])
+
+
 class BeeYOLODetector:
     """Wrapper around fine-tuned / base YOLO model for bee detection."""
 
@@ -58,7 +110,7 @@ class BeeYOLODetector:
         self.model_path = self._resolve_best_model()
         self._load_model()
 
-    def detect_bee(self, frame, roi=None, conf_threshold=0.25):
+    def detect_bee(self, frame, roi=None, conf_threshold=0.25, use_clahe=False):
         """
         Detect bee in frame or ROI.
         roi: (x, y, w, h) in pixel coordinates.
@@ -67,21 +119,26 @@ class BeeYOLODetector:
         if self.model is None or frame is None:
             return None
 
+        target_frame = preprocess_ir_frame(frame) if use_clahe else frame
         offset_x, offset_y = 0, 0
-        img = frame
+        img = target_frame
 
         if roi is not None:
             rx, ry, rw, rh = [int(v) for v in roi]
-            rx = max(0, min(rx, frame.shape[1] - 1))
-            ry = max(0, min(ry, frame.shape[0] - 1))
-            rw = max(1, min(rw, frame.shape[1] - rx))
-            rh = max(1, min(rh, frame.shape[0] - ry))
-            img = frame[ry:ry + rh, rx:rx + rw]
+            rx = max(0, min(rx, target_frame.shape[1] - 1))
+            ry = max(0, min(ry, target_frame.shape[0] - 1))
+            rw = max(1, min(rw, target_frame.shape[1] - rx))
+            rh = max(1, min(rh, target_frame.shape[0] - ry))
+            img = target_frame[ry:ry + rh, rx:rx + rw]
             offset_x, offset_y = rx, ry
 
         try:
             with self._lock:
-                results = self.model.predict(img, conf=conf_threshold, verbose=False)
+                try:
+                    results = self.model.track(img, tracker="bytetrack.yaml", conf=conf_threshold, verbose=False)
+                except Exception:
+                    results = self.model.predict(img, conf=conf_threshold, verbose=False)
+
             if not results or len(results) == 0 or len(results[0].boxes) == 0:
                 return None
 

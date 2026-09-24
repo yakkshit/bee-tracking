@@ -1786,14 +1786,31 @@ elif st.session_state.tab == "track":
             st.rerun()
 
     with st.expander("⚙️ Tracking Config", expanded=False):
-        st.session_state.track_stride = st.slider(
-            "Frame Stride",
-            min_value=1,
-            max_value=60,
-            value=st.session_state.track_stride,
-            step=1,
-            help="1x tracks every frame, 2x tracks every other frame, increasing playback speed."
-        )
+        c_tr1, c_tr2 = st.columns(2)
+        with c_tr1:
+            st.session_state.track_stride = st.slider(
+                "Frame Stride",
+                min_value=1,
+                max_value=60,
+                value=st.session_state.track_stride,
+                step=1,
+                help="1x tracks every frame, 2x tracks every other frame, increasing playback speed."
+            )
+        with c_tr2:
+            st.session_state.apply_clahe = st.checkbox(
+                "⚡ IR Camera CLAHE Enhancement",
+                value=st.session_state.get("apply_clahe", True),
+                help="Applies Contrast Limited Adaptive Histogram Equalization to remove center IR glare and boost dark bee detection."
+            )
+        if st.button("📦 Harvest Pre-Tracked Videos into YOLO Dataset", help="Scans all tracked session CSVs and generates a normalized YOLO dataset (bee_dataset.yaml)"):
+            with st.spinner("Harvesting dataset from pre-tracked videos..."):
+                try:
+                    import harvest_pretracked
+                    yaml_p = harvest_pretracked.create_dataset_yaml()
+                    n_samp = harvest_pretracked.main()
+                    st.success(f"✅ Harvested dataset saved to `{yaml_p}`")
+                except Exception as e:
+                    st.error(f"Harvest error: {e}")
 
     if st.session_state.tag_mode:
         mode_labels = {
