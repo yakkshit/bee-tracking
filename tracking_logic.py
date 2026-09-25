@@ -184,6 +184,14 @@ class HybridBeeTracker:
         self.kalman = KalmanBeeFilter()
         self.miss_count = 0
 
+    @property
+    def tracker(self):
+        return self.csrt_tracker
+
+    @tracker.setter
+    def tracker(self, value):
+        self.csrt_tracker = value
+
     def reset_to_searching(self):
         self.state = "SEARCHING"
         self.csrt_tracker = None
