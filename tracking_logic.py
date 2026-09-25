@@ -19,10 +19,96 @@ import cv2
 import time
 import shutil
 import threading
+import collections
 import numpy as np
+from pathlib import Path
 
 _YOLO_DETECTOR = None
 _ONLINE_TRAINER = None
+
+
+def get_safe_path(file_path):
+    """
+    Cross-platform pathlib Path utility. On Windows (win32), if absolute path length 
+    exceeds 250 characters, prepends \\?\ to bypass MAX_PATH limits safely.
+    """
+    if not file_path:
+        return Path(".")
+    p = Path(file_path).resolve()
+    if sys.platform == 'win32':
+        p_str = str(p)
+        if len(p_str) > 250 and not p_str.startswith("\\\\?\\"):
+            return Path("\\\\?\\" + p_str)
+    return p
+
+
+class CameraThread:
+    """
+    Non-blocking threaded camera reader that continuously grabs frames at 60 FPS 
+    into a deque(maxlen=2). Main UI loop only pulls the latest frame to eliminate lag.
+    """
+    def __init__(self, source=0):
+        self.source = source
+        self.cap = None
+        self.buffer = collections.deque(maxlen=2)
+        self.running = False
+        self.thread = None
+        self._lock = threading.Lock()
+
+    def start(self):
+        if self.running:
+            return
+        if self.source == "live" or isinstance(self.source, int):
+            cam_idx = 0 if self.source == "live" else self.source
+            if os.name == 'nt':
+                self.cap = cv2.VideoCapture(cam_idx, cv2.CAP_DSHOW)
+            else:
+                self.cap = cv2.VideoCapture(cam_idx)
+        else:
+            safe_p = str(get_safe_path(self.source))
+            self.cap = cv2.VideoCapture(safe_p)
+
+        self.running = True
+        self.thread = threading.Thread(target=self._update, daemon=True)
+        self.thread.start()
+
+    def _update(self):
+        while self.running and self.cap and self.cap.isOpened():
+            ret, frame = self.cap.read()
+            if ret and frame is not None:
+                with self._lock:
+                    self.buffer.append(frame)
+            else:
+                time.sleep(0.01)
+
+    def read_latest(self):
+        with self._lock:
+            if self.buffer:
+                return True, self.buffer[-1].copy()
+        return False, None
+
+    def stop(self):
+        self.running = False
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=0.5)
+        if self.cap:
+            self.cap.release()
+            self.cap = None
+
+
+def create_csrt_tracker():
+    """Create OpenCV CSRT tracker with fallbacks across opencv-python versions."""
+    if hasattr(cv2, "TrackerCSRT_create"):
+        return cv2.TrackerCSRT_create()
+    elif hasattr(cv2, "legacy") and hasattr(cv2.legacy, "TrackerCSRT_create"):
+        return cv2.legacy.TrackerCSRT_create()
+    elif hasattr(cv2, "TrackerKCF_create"):
+        return cv2.TrackerKCF_create()
+    elif hasattr(cv2, "legacy") and hasattr(cv2.legacy, "TrackerKCF_create"):
+        return cv2.legacy.TrackerKCF_create()
+    elif hasattr(cv2, "TrackerMIL_create"):
+        return cv2.TrackerMIL_create()
+    return None
 
 
 def preprocess_ir_frame(frame, clip_limit=2.5, tile_grid_size=(8, 8)):
@@ -75,6 +161,153 @@ class KalmanBeeFilter:
         measurement = np.array([[np.float32(cx)], [np.float32(cy)]], np.float32)
         corrected = self.kf.correct(measurement)
         return float(corrected[0][0]), float(corrected[1][0])
+
+
+class HybridBeeTracker:
+    """
+    Hybrid YOLO + OpenCV CSRT Single-Object Tracker Pipeline.
+    
+    States:
+    - SEARCHING (YOLO Active): Runs YOLO/Detector to locate the bee bounding box.
+      Once found (conf > 0.25), initializes TrackerCSRT and transitions to LOCKED_ON.
+    - LOCKED_ON (CSRT Active): Does NOT run YOLO every frame. Runs tracker.update(frame) at 200+ FPS.
+      Handles motion blur and fast movement. If CSRT loses lock (success == False),
+      transitions back to SEARCHING for instant YOLO re-acquisition.
+    """
+    def __init__(self, yolo_detector=None):
+        self.state = "SEARCHING"  # "SEARCHING" or "LOCKED_ON"
+        self.yolo_detector = yolo_detector or get_yolo_detector()
+        self.csrt_tracker = None
+        self.last_bbox = None
+        self.last_center = None
+        self.confidence = 0.0
+        self.kalman = KalmanBeeFilter()
+        self.miss_count = 0
+
+    def reset_to_searching(self):
+        self.state = "SEARCHING"
+        self.csrt_tracker = None
+        self.miss_count = 0
+
+    def force_lock_on(self, frame, cx, cy, box_size=38):
+        """Force CSRT tracker lock-on at user clicked coordinate (Help / Entry tag)."""
+        if frame is None:
+            return False
+        h_f, w_f = frame.shape[:2]
+        x1 = max(0, int(cx - box_size / 2.0))
+        y1 = max(0, int(cy - box_size / 2.0))
+        bw = min(box_size, w_f - x1)
+        bh = min(box_size, h_f - y1)
+        bbox = (float(x1), float(y1), float(bw), float(bh))
+        
+        tracker = create_csrt_tracker()
+        if tracker is not None:
+            try:
+                tracker.init(frame, (int(x1), int(y1), int(bw), int(bh)))
+                self.csrt_tracker = tracker
+                self.state = "LOCKED_ON"
+                self.last_bbox = bbox
+                self.last_center = (cx, cy)
+                self.confidence = 1.0
+                self.kalman.init(cx, cy)
+                self.miss_count = 0
+                return True
+            except Exception as e:
+                print(f"[HybridBeeTracker] CSRT init exception: {e}")
+        self.state = "SEARCHING"
+        return False
+
+    def update(self, frame, use_clahe=True, arena_center=None, arena_radius=None):
+        """
+        Processes frame using Hybrid State Machine:
+        Returns: (center, bbox, status, confidence)
+        """
+        if frame is None:
+            return None, None, "lost", 0.0
+
+        h_f, w_f = frame.shape[:2]
+        processed_frame = preprocess_ir_frame(frame) if use_clahe else frame
+
+        # --- STATE B: LOCKED_ON (CSRT Active - NO YOLO) ---
+        if self.state == "LOCKED_ON" and self.csrt_tracker is not None:
+            try:
+                success, tb = self.csrt_tracker.update(processed_frame)
+                if success:
+                    x, y, w, h = [float(v) for v in tb]
+                    cx, cy = x + w / 2.0, y + h / 2.0
+                    
+                    # Verify boundary sanity
+                    in_bounds = (0 <= cx < w_f and 0 <= cy < h_f)
+                    if arena_center and arena_radius:
+                        acx, acy = arena_center
+                        dist_arena = np.hypot(cx - acx, cy - acy)
+                        if dist_arena > arena_radius + 50:
+                            in_bounds = False
+
+                    if in_bounds:
+                        self.last_bbox = (x, y, w, h)
+                        self.last_center = (cx, cy)
+                        self.confidence = 0.90
+                        self.kalman.correct(cx, cy)
+                        self.miss_count = 0
+                        return (cx, cy), self.last_bbox, "ok", 0.90
+            except Exception:
+                pass
+
+            # CSRT lost target -> transition back to SEARCHING for YOLO re-acquisition
+            self.miss_count += 1
+            if self.miss_count >= 2:
+                self.state = "SEARCHING"
+                self.csrt_tracker = None
+
+        # --- STATE A: SEARCHING (YOLO Active) ---
+        self.state = "SEARCHING"
+        yolo_res = self.yolo_detector.detect_bee(
+            processed_frame,
+            roi=self.last_bbox if self.last_bbox else None,
+            conf_threshold=0.20,
+            use_clahe=False
+        )
+        if yolo_res is None and self.last_center is not None:
+            # Search wider ROI around last known position
+            lcx, lcy = self.last_center
+            win_sz = 300
+            roi_search = (lcx - win_sz / 2.0, lcy - win_sz / 2.0, win_sz, win_sz)
+            yolo_res = self.yolo_detector.detect_bee(processed_frame, roi=roi_search, conf_threshold=0.15, use_clahe=False)
+
+        if yolo_res is not None:
+            ycx, ycy, yw, yh, yconf = yolo_res
+            bbox = (ycx - yw / 2.0, ycy - yh / 2.0, yw, yh)
+            
+            # Transition to LOCKED_ON with CSRT
+            tracker = create_csrt_tracker()
+            if tracker is not None:
+                try:
+                    tracker.init(processed_frame, (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])))
+                    self.csrt_tracker = tracker
+                    self.state = "LOCKED_ON"
+                except Exception:
+                    self.csrt_tracker = None
+
+            self.last_bbox = bbox
+            self.last_center = (ycx, ycy)
+            self.confidence = yconf
+            self.kalman.correct(ycx, ycy)
+            self.miss_count = 0
+            return (ycx, ycy), bbox, "ok", yconf
+
+        # Try Kalman Filter prediction fallback if temporary dropout
+        pred = self.kalman.predict()
+        if pred is not None and self.last_center is not None:
+            pcx, pcy = pred
+            dist_pred = np.hypot(pcx - self.last_center[0], pcy - self.last_center[1])
+            if dist_pred < 150:
+                bw = self.last_bbox[2] if self.last_bbox else 38
+                bh = self.last_bbox[3] if self.last_bbox else 38
+                bbox = (pcx - bw / 2.0, pcy - bh / 2.0, bw, bh)
+                return (pcx, pcy), bbox, "weak", 0.40
+
+        return None, None, "lost", 0.0
 
 
 class BeeYOLODetector:

@@ -78,7 +78,15 @@ from matplotlib.collections import LineCollection
 from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
-from tracking_logic import get_tracking_end_frame, get_yolo_detector, get_online_trainer
+from tracking_logic import (
+    get_tracking_end_frame,
+    get_yolo_detector,
+    get_online_trainer,
+    get_safe_path,
+    CameraThread,
+    create_csrt_tracker,
+    HybridBeeTracker,
+)
 
 # ---------------------------------------------------------------------------
 # Page configuration & UI style rules
@@ -475,145 +483,65 @@ def extract_template(gray, bbox):
 
 def init_track_state(frame, bbox, slot_idx=0):
     slot = st.session_state.slots[slot_idx]
-    tracker = create_tracker()
     ib = [int(v) for v in clamp_bbox(bbox, frame.shape)]
-    tracker_ok = False
-    if tracker is not None:
-        tracker.init(frame, tuple(ib))
-        tracker_ok = True
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     cx, cy = bbox_center(ib)
+
+    hybrid = HybridBeeTracker()
+    hybrid.force_lock_on(frame, cx, cy, bbox_size=ib[2])
+    slot["hybrid_tracker"] = hybrid
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     was_on_feeder = False
-    if slot["circle_center"] and slot["scale_factor"]:
+    if slot.get("circle_center") and slot.get("scale_factor"):
         _, _, d = pixel_to_mm(cx, cy, slot["circle_center"], slot["scale_factor"])
-        was_on_feeder = d <= slot["feeder_radius_mm"]
+        was_on_feeder = d <= slot.get("feeder_radius_mm", 40.0)
+
     return {
         "bbox": tuple(float(v) for v in ib),
         "center": (cx, cy),
         "template": extract_template(gray, ib),
-        "tracker": tracker,
-        "tracker_initialized": tracker_ok,
+        "tracker": hybrid.tracker,
+        "tracker_initialized": (hybrid.state == "LOCKED_ON"),
         "was_on_feeder": was_on_feeder,
         "frame_idx": 0,
+        "tracker_state": hybrid.state,
     }
 
 
 def track_single_frame(frame, state, settings, slot_idx=0):
     slot = st.session_state.slots[slot_idx]
-    xc, yc = slot["circle_center"]
-    r_px = slot["circle_radius"]
-    scale = slot["scale_factor"]
-    feeder_mm = settings["feeder_radius_mm"]
-    threshold = settings["template_threshold"]
-    base_margin = settings["search_margin"]
+    if "hybrid_tracker" not in slot or slot["hybrid_tracker"] is None:
+        slot["hybrid_tracker"] = HybridBeeTracker()
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    last_bbox = state["bbox"]
-    last_center = state["center"]
-    template = state["template"]
-    tracker = state["tracker"]
-    tracker_ok = state["tracker_initialized"]
-    was_on_feeder = state["was_on_feeder"]
+    hybrid = slot["hybrid_tracker"]
+    arena_center = slot.get("circle_center")
+    arena_radius = slot.get("circle_radius")
 
-    near_feeder = was_on_feeder
-    if last_center:
-        _, _, last_d = pixel_to_mm(last_center[0], last_center[1], (xc, yc), scale)
-        near_feeder = near_feeder or last_d <= feeder_mm * 2.0
+    center, bbox, status, tracker_state_str = hybrid.update(
+        frame, arena_center=arena_center, arena_radius=arena_radius
+    )
 
-    search_margin = base_margin * 1.5 if near_feeder else base_margin
-    detected, confidence, method = None, 0.0, "hold"
-
-    if tracker is not None and tracker_ok:
-        ok, tb = tracker.update(frame)
-        if ok:
-            x, y, w, h = [float(v) for v in tb]
-            cx, cy = x + w / 2.0, y + h / 2.0
-            _, _, d = pixel_to_mm(cx, cy, (xc, yc), scale)
-            if d <= OUTER_RADIUS_MM + 40:
-                detected = (cx, cy)
-                last_bbox = clamp_bbox((x, y, w, h), frame.shape)
-                confidence, method = 0.85, "tracker"
-
-    if detected is None and last_bbox is not None:
-        match = template_match(gray, last_bbox, template, search_margin, threshold * (0.65 if near_feeder else 1.0))
-        if match:
-            x, y, w, h, conf = match
-            detected = (x + w / 2.0, y + h / 2.0)
-            last_bbox = clamp_bbox((x, y, w, h), frame.shape)
-            confidence, method = conf, "template"
-
-    if detected is None and last_center is not None:
-        win = 300 if near_feeder else 250
-        spot = find_darkest_spot_in_roi(gray, last_center, (win, win))
-        if spot:
-            dist_px = np.hypot(spot[0] - last_center[0], spot[1] - last_center[1])
-            if dist_px <= (330 if near_feeder else 280):
-                detected = spot
-                bw = last_bbox[2] if last_bbox else TAG_BOX_PX
-                bh = last_bbox[3] if last_bbox else TAG_BOX_PX
-                last_bbox = clamp_bbox((spot[0] - bw / 2, spot[1] - bh / 2, bw, bh), frame.shape)
-                confidence, method = 0.45, "darkspot"
-
-    if detected is None and near_feeder:
-        exclude_px = feeder_mm / scale
-        spot = find_darkest_in_arena(gray, xc, yc, r_px, exclude_center_px=exclude_px)
-        if spot and last_center:
-            dist_px = np.hypot(spot[0] - last_center[0], spot[1] - last_center[1])
-            _, _, d_spot = pixel_to_mm(spot[0], spot[1], (xc, yc), scale)
-            if dist_px <= 300 and d_spot > feeder_mm * 0.8:
-                detected = spot
-                bw = last_bbox[2] if last_bbox else TAG_BOX_PX
-                bh = last_bbox[3] if last_bbox else TAG_BOX_PX
-                last_bbox = clamp_bbox((spot[0] - bw / 2, spot[1] - bh / 2, bw, bh), frame.shape)
-                confidence, method = 0.4, "arena_scan"
-
-    # YOLO Detector Fallback & Re-acquisition (Continuously fine-tuned for high accuracy)
-    if detected is None:
-        yolo_det = get_yolo_detector()
-        yolo_res = yolo_det.detect_bee(frame, roi=last_bbox if last_bbox else None, conf_threshold=0.15)
-        if yolo_res is None and last_center is not None:
-            win = 400 if near_feeder else 300
-            roi = (last_center[0] - win / 2, last_center[1] - win / 2, win, win)
-            yolo_res = yolo_det.detect_bee(frame, roi=roi, conf_threshold=0.10)
-
-        if yolo_res:
-            ycx, ycy, yw, yh, yconf = yolo_res
-            _, _, d = pixel_to_mm(ycx, ycy, (xc, yc), scale)
-            if d <= OUTER_RADIUS_MM + 45:
-                detected = (ycx, ycy)
-                last_bbox = clamp_bbox((ycx - yw / 2, ycy - yh / 2, yw, yh), frame.shape)
-                confidence, method = yconf, "yolo"
-
-    if detected is None:
+    if center is None or status == "lost":
         return None, None, "lost", state
 
-    cx, cy = detected
-    _, _, d_mm = pixel_to_mm(cx, cy, (xc, yc), scale)
-    now_on_feeder = d_mm <= feeder_mm
-    leaving_feeder = was_on_feeder and not now_on_feeder
+    cx, cy = center
+    was_on_feeder = False
+    if slot.get("circle_center") and slot.get("scale_factor"):
+        _, _, d = pixel_to_mm(cx, cy, slot["circle_center"], slot["scale_factor"])
+        was_on_feeder = d <= slot.get("feeder_radius_mm", 40.0)
 
-    if tracker is not None and (leaving_feeder or method in ("template", "darkspot", "arena_scan", "yolo")):
-        tracker = create_tracker()
-        if tracker is not None:
-            tracker.init(frame, tuple(int(v) for v in last_bbox))
-            tracker_ok = True
-
-    if state["frame_idx"] % settings["template_update_interval"] == 0:
-        new_tpl = extract_template(gray, last_bbox)
-        if new_tpl is not None:
-            template = new_tpl
-
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     new_state = {
-        "bbox": last_bbox,
+        "bbox": bbox,
         "center": (cx, cy),
-        "template": template,
-        "tracker": tracker,
-        "tracker_initialized": tracker_ok,
-        "was_on_feeder": now_on_feeder,
-        "frame_idx": state["frame_idx"],
+        "template": extract_template(gray, bbox),
+        "tracker": hybrid.tracker,
+        "tracker_initialized": (hybrid.state == "LOCKED_ON"),
+        "was_on_feeder": was_on_feeder,
+        "frame_idx": state.get("frame_idx", 0) + 1 if isinstance(state, dict) else 0,
+        "tracker_state": tracker_state_str,
     }
-    status = "ok" if confidence >= settings["lost_threshold"] else "weak"
-    return (cx, cy), last_bbox, status, new_state
+    return (cx, cy), bbox, status, new_state
 
 
 def make_coord(frame_idx, cx, cy, fps, slot_idx=0, tag_type="auto", status="ok"):
@@ -930,9 +858,10 @@ def get_cap_handle(path):
     if path == "live":
         cam_idx = st.session_state.get("camera_index", 0)
         return get_live_camera(cam_idx)
-    if path not in _CAP_HANDLES or not _CAP_HANDLES[path].isOpened():
-        _CAP_HANDLES[path] = cv2.VideoCapture(path)
-    return _CAP_HANDLES[path]
+    safe_p = str(get_safe_path(path))
+    if safe_p not in _CAP_HANDLES or not _CAP_HANDLES[safe_p].isOpened():
+        _CAP_HANDLES[safe_p] = cv2.VideoCapture(safe_p)
+    return _CAP_HANDLES[safe_p]
 
 @st.cache_resource
 def get_live_camera(cam_idx):
@@ -944,14 +873,22 @@ def read_frame(video_path, frame_idx):
     if not video_path:
         return False, None
     if video_path == "live":
-        cap = get_cap_handle("live")
-        ok, frame = cap.read()
-        return ok, frame
+        cam_thread = st.session_state.get("camera_thread", None)
+        if cam_thread is None or not cam_thread.running:
+            cam_idx = st.session_state.get("camera_index", 0)
+            cam_thread = CameraThread(camera_idx=cam_idx)
+            cam_thread.start()
+            st.session_state["camera_thread"] = cam_thread
+        frame = cam_thread.get_frame()
+        if frame is None:
+            return False, None
+        return True, frame
     cap = get_cap_handle(video_path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
     ok, frame = cap.read()
     if not ok:
-        cap.open(video_path)
+        safe_p = str(get_safe_path(video_path))
+        cap.open(safe_p)
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ok, frame = cap.read()
     return ok, frame
@@ -968,7 +905,8 @@ def video_meta(video_path):
             "fps": 30.0,
             "frames": 999999,
         }
-    cap = cv2.VideoCapture(video_path)
+    safe_p = str(get_safe_path(video_path))
+    cap = cv2.VideoCapture(safe_p)
     meta = {
         "w": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
         "h": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
