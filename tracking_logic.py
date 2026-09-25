@@ -189,8 +189,10 @@ class HybridBeeTracker:
         self.csrt_tracker = None
         self.miss_count = 0
 
-    def force_lock_on(self, frame, cx, cy, box_size=38):
+    def force_lock_on(self, frame, cx, cy, box_size=38, bbox_size=None):
         """Force CSRT tracker lock-on at user clicked coordinate (Help / Entry tag)."""
+        if bbox_size is not None:
+            box_size = bbox_size
         if frame is None:
             return False
         h_f, w_f = frame.shape[:2]
