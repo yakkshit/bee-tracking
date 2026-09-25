@@ -22,6 +22,7 @@ import threading
 import collections
 import numpy as np
 from pathlib import Path
+from scipy.signal import savgol_filter
 
 _YOLO_DETECTOR = None
 _ONLINE_TRAINER = None
@@ -163,26 +164,40 @@ class KalmanBeeFilter:
         return float(corrected[0][0]), float(corrected[1][0])
 
 
-class HybridBeeTracker:
+class RobustBeeTracker:
     """
-    Hybrid YOLO + OpenCV CSRT Single-Object Tracker Pipeline.
-    
-    States:
-    - SEARCHING (YOLO Active): Runs YOLO/Detector to locate the bee bounding box.
-      Once found (conf > 0.25), initializes TrackerCSRT and transitions to LOCKED_ON.
-    - LOCKED_ON (CSRT Active): Does NOT run YOLO every frame. Runs tracker.update(frame) at 200+ FPS.
-      Handles motion blur and fast movement. If CSRT loses lock (success == False),
-      transitions back to SEARCHING for instant YOLO re-acquisition.
+    Robust Single-Object Bee Tracking Pipeline using:
+    1. CLAHE + Gaussian Contrast Enhancement
+    2. Adaptive Background Subtraction (MOG2) for motion isolation against static arena
+    3. Morphological cleanup + Size/Proximity Blob Analysis
+    4. 4-State Kalman Filter for velocity prediction & frame dropout handling
+    5. Savitzky-Golay filter for smooth trajectory path estimation
     """
-    def __init__(self, yolo_detector=None):
-        self.state = "SEARCHING"  # "SEARCHING" or "LOCKED_ON"
-        self.yolo_detector = yolo_detector or get_yolo_detector()
-        self.csrt_tracker = None
-        self.last_bbox = None
-        self.last_center = None
-        self.confidence = 0.0
+    def __init__(self, yolo_detector=None, bg_history=500, var_threshold=16, min_area=30, max_area=600):
+        self.bg_history = bg_history
+        self.var_threshold = var_threshold
+        self.min_area = min_area
+        self.max_area = max_area
+
+        self.bg_subtractor = cv2.createBackgroundSubtractorMOG2(
+            history=self.bg_history,
+            varThreshold=self.var_threshold,
+            detectShadows=False
+        )
+
         self.kalman = KalmanBeeFilter()
-        self.miss_count = 0
+        self.csrt_tracker = None
+        self.state = "SEARCHING"  # "SEARCHING" or "LOCKED_ON"
+        
+        self.is_tracking = False
+        self.last_position = None
+        self.last_bbox = None
+        self.confidence = 0.0
+        self.frame_count = 0
+        self.bg_initialized = False
+
+        self.x_history = collections.deque(maxlen=300)
+        self.y_history = collections.deque(maxlen=300)
 
     @property
     def tracker(self):
@@ -192,132 +207,234 @@ class HybridBeeTracker:
     def tracker(self, value):
         self.csrt_tracker = value
 
-    def reset_to_searching(self):
-        self.state = "SEARCHING"
-        self.csrt_tracker = None
-        self.miss_count = 0
+    def initialize_background(self, frame, num_frames=20):
+        """Warm up background model with initial frames."""
+        if frame is None or self.bg_initialized:
+            return
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame.copy()
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        for _ in range(num_frames):
+            self.bg_subtractor.apply(enhanced)
+        self.bg_initialized = True
 
     def force_lock_on(self, frame, cx, cy, box_size=38, bbox_size=None):
-        """Force CSRT tracker lock-on at user clicked coordinate (Help / Entry tag)."""
+        """Force tracker lock-on at user clicked coordinate (Help / Entry tag)."""
         if bbox_size is not None:
             box_size = bbox_size
         if frame is None:
             return False
+
         h_f, w_f = frame.shape[:2]
         x1 = max(0, int(cx - box_size / 2.0))
         y1 = max(0, int(cy - box_size / 2.0))
         bw = min(box_size, w_f - x1)
         bh = min(box_size, h_f - y1)
         bbox = (float(x1), float(y1), float(bw), float(bh))
-        
+
         tracker = create_csrt_tracker()
         if tracker is not None:
             try:
                 tracker.init(frame, (int(x1), int(y1), int(bw), int(bh)))
                 self.csrt_tracker = tracker
-                self.state = "LOCKED_ON"
-                self.last_bbox = bbox
-                self.last_center = (cx, cy)
-                self.confidence = 1.0
-                self.kalman.init(cx, cy)
-                self.miss_count = 0
-                return True
-            except Exception as e:
-                print(f"[HybridBeeTracker] CSRT init exception: {e}")
+            except Exception:
+                self.csrt_tracker = None
+
+        self.state = "LOCKED_ON"
+        self.is_tracking = True
+        self.last_position = (float(cx), float(cy))
+        self.last_bbox = bbox
+        self.confidence = 1.0
+        self.kalman.init(cx, cy)
+        
+        self.x_history.append(float(cx))
+        self.y_history.append(float(cy))
+        return True
+
+    def reset_to_searching(self):
         self.state = "SEARCHING"
-        return False
+        self.is_tracking = False
+        self.csrt_tracker = None
+
+    def detect_bee_blob(self, frame, arena_center=None, arena_radius=None):
+        """Detect bee using CLAHE + Background Subtraction + Blob Filtering."""
+        if frame is None:
+            return None, None
+
+        if len(frame.shape) == 3:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = frame.copy()
+
+        # 1. Contrast Enhancement
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
+
+        # 2. Background Subtraction
+        fg_mask = self.bg_subtractor.apply(blurred)
+
+        # 3. Morphological Operations
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel, iterations=2)
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+        # 4. Find Contours
+        contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # 5. Filter Blobs by Size & Arena Bounds
+        valid_blobs = []
+        for c in contours:
+            area = cv2.contourArea(c)
+            if self.min_area <= area <= self.max_area:
+                M = cv2.moments(c)
+                if M["m00"] > 0:
+                    cx = float(M["m10"] / M["m00"])
+                    cy = float(M["m01"] / M["m00"])
+                    if arena_center and arena_radius:
+                        acx, acy = arena_center
+                        if np.hypot(cx - acx, cy - acy) > arena_radius + 40:
+                            continue
+                    valid_blobs.append(((cx, cy), c, area))
+
+        if not valid_blobs:
+            return None, None
+
+        # Select best blob: if we have a last position, pick closest blob to last position
+        if self.last_position is not None:
+            lcx, lcy = self.last_position
+            best_blob = min(valid_blobs, key=lambda b: np.hypot(b[0][0] - lcx, b[0][1] - lcy))
+            if np.hypot(best_blob[0][0] - lcx, best_blob[0][1] - lcy) > 150:
+                best_blob = max(valid_blobs, key=lambda b: b[2])
+        else:
+            best_blob = max(valid_blobs, key=lambda b: b[2])
+
+        return best_blob[0], best_blob[1]
 
     def update(self, frame, use_clahe=True, arena_center=None, arena_radius=None):
-        """
-        Processes frame using Hybrid State Machine:
-        Returns: (center, bbox, status, confidence)
-        """
+        """Main tracking loop combining MOG2, CSRT, Kalman & Darkspot fallbacks."""
         if frame is None:
             return None, None, "lost", 0.0
 
-        h_f, w_f = frame.shape[:2]
-        processed_frame = preprocess_ir_frame(frame) if use_clahe else frame
+        self.frame_count += 1
+        if not self.bg_initialized:
+            self.initialize_background(frame)
 
-        # --- STATE B: LOCKED_ON (CSRT Active - NO YOLO) ---
+        h_f, w_f = frame.shape[:2]
+        detected_pos, contour = self.detect_bee_blob(frame, arena_center=arena_center, arena_radius=arena_radius)
+
+        # If CSRT lock-on active, attempt CSRT update first
         if self.state == "LOCKED_ON" and self.csrt_tracker is not None:
             try:
-                success, tb = self.csrt_tracker.update(processed_frame)
-                if success:
+                ok, tb = self.csrt_tracker.update(frame)
+                if ok:
                     x, y, w, h = [float(v) for v in tb]
                     cx, cy = x + w / 2.0, y + h / 2.0
-                    
-                    # Verify boundary sanity
-                    in_bounds = (0 <= cx < w_f and 0 <= cy < h_f)
-                    if arena_center and arena_radius:
-                        acx, acy = arena_center
-                        dist_arena = np.hypot(cx - acx, cy - acy)
-                        if dist_arena > arena_radius + 50:
-                            in_bounds = False
+                    if 0 <= cx < w_f and 0 <= cy < h_f:
+                        if detected_pos:
+                            dcx, dcy = detected_pos
+                            if np.hypot(cx - dcx, cy - dcy) < 50:
+                                cx, cy = (cx + dcx) / 2.0, (cy + dcy) / 2.0
 
-                    if in_bounds:
-                        self.last_bbox = (x, y, w, h)
-                        self.last_center = (cx, cy)
+                        scx, scy = self.kalman.correct(cx, cy)
+                        bw = w if w > 10 else 38.0
+                        bh = h if h > 10 else 38.0
+                        self.last_bbox = (scx - bw / 2.0, scy - bh / 2.0, bw, bh)
+                        self.last_position = (scx, scy)
                         self.confidence = 0.90
-                        self.kalman.correct(cx, cy)
-                        self.miss_count = 0
-                        return (cx, cy), self.last_bbox, "ok", 0.90
+                        self.x_history.append(scx)
+                        self.y_history.append(scy)
+                        return (scx, scy), self.last_bbox, "ok", 0.90
             except Exception:
                 pass
 
-            # CSRT lost target -> transition back to SEARCHING for YOLO re-acquisition
-            self.miss_count += 1
-            if self.miss_count >= 2:
-                self.state = "SEARCHING"
-                self.csrt_tracker = None
+        if detected_pos is not None:
+            cx, cy = detected_pos
+            scx, scy = self.kalman.correct(cx, cy)
+            bw, bh = 38.0, 38.0
+            if contour is not None:
+                bx, by, cbw, cbh = cv2.boundingRect(contour)
+                bw, bh = max(20.0, float(cbw)), max(20.0, float(cbh))
 
-        # --- STATE A: SEARCHING (YOLO Active) ---
-        self.state = "SEARCHING"
-        yolo_res = self.yolo_detector.detect_bee(
-            processed_frame,
-            roi=self.last_bbox if self.last_bbox else None,
-            conf_threshold=0.20,
-            use_clahe=False
-        )
-        if yolo_res is None and self.last_center is not None:
-            # Search wider ROI around last known position
-            lcx, lcy = self.last_center
-            win_sz = 300
-            roi_search = (lcx - win_sz / 2.0, lcy - win_sz / 2.0, win_sz, win_sz)
-            yolo_res = self.yolo_detector.detect_bee(processed_frame, roi=roi_search, conf_threshold=0.15, use_clahe=False)
+            self.last_bbox = (scx - bw / 2.0, scy - bh / 2.0, bw, bh)
+            self.last_position = (scx, scy)
+            self.is_tracking = True
+            self.state = "LOCKED_ON"
+            self.confidence = 0.85
+            self.x_history.append(scx)
+            self.y_history.append(scy)
 
-        if yolo_res is not None:
-            ycx, ycy, yw, yh, yconf = yolo_res
-            bbox = (ycx - yw / 2.0, ycy - yh / 2.0, yw, yh)
-            
-            # Transition to LOCKED_ON with CSRT
+            # Sync CSRT tracker to blob
             tracker = create_csrt_tracker()
             if tracker is not None:
                 try:
-                    tracker.init(processed_frame, (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])))
+                    tracker.init(frame, (int(self.last_bbox[0]), int(self.last_bbox[1]), int(bw), int(bh)))
                     self.csrt_tracker = tracker
-                    self.state = "LOCKED_ON"
                 except Exception:
-                    self.csrt_tracker = None
+                    pass
 
-            self.last_bbox = bbox
-            self.last_center = (ycx, ycy)
-            self.confidence = yconf
-            self.kalman.correct(ycx, ycy)
-            self.miss_count = 0
-            return (ycx, ycy), bbox, "ok", yconf
+            return (scx, scy), self.last_bbox, "ok", 0.85
 
-        # Try Kalman Filter prediction fallback if temporary dropout
+        # Fallback 1: Dark spot search if bee is stationary
+        if self.last_position is not None:
+            lcx, lcy = self.last_position
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+            win_sz = 200
+            x1 = max(0, int(lcx - win_sz / 2))
+            y1 = max(0, int(lcy - win_sz / 2))
+            roi = gray[y1 : min(h_f, y1 + win_sz), x1 : min(w_f, x1 + win_sz)]
+            if roi.size > 0:
+                min_val, _, min_loc, _ = cv2.minMaxLoc(roi)
+                if min_val < 100:  # Dark patch found
+                    cx = float(x1 + min_loc[0])
+                    cy = float(y1 + min_loc[1])
+                    scx, scy = self.kalman.correct(cx, cy)
+                    self.last_bbox = (scx - 19.0, scy - 19.0, 38.0, 38.0)
+                    self.last_position = (scx, scy)
+                    self.confidence = 0.50
+                    self.x_history.append(scx)
+                    self.y_history.append(scy)
+                    return (scx, scy), self.last_bbox, "weak", 0.50
+
+        # Fallback 2: Kalman prediction
         pred = self.kalman.predict()
-        if pred is not None and self.last_center is not None:
+        if pred is not None and self.is_tracking:
             pcx, pcy = pred
-            dist_pred = np.hypot(pcx - self.last_center[0], pcy - self.last_center[1])
-            if dist_pred < 150:
-                bw = self.last_bbox[2] if self.last_bbox else 38
-                bh = self.last_bbox[3] if self.last_bbox else 38
-                bbox = (pcx - bw / 2.0, pcy - bh / 2.0, bw, bh)
-                return (pcx, pcy), bbox, "weak", 0.40
+            bw = self.last_bbox[2] if self.last_bbox else 38.0
+            bh = self.last_bbox[3] if self.last_bbox else 38.0
+            self.last_bbox = (pcx - bw / 2.0, pcy - bh / 2.0, bw, bh)
+            self.last_position = (pcx, pcy)
+            self.x_history.append(pcx)
+            self.y_history.append(pcy)
+            return (pcx, pcy), self.last_bbox, "weak", 0.40
 
         return None, None, "lost", 0.0
+
+    def get_smoothed_path(self, window=15, poly_order=3):
+        """Return Savitzky-Golay smoothed trajectory points."""
+        if len(self.x_history) < window or window < 5:
+            return list(zip(self.x_history, self.y_history))
+
+        if window % 2 == 0:
+            window += 1
+        if len(self.x_history) < window:
+            window = len(self.x_history) if len(self.x_history) % 2 != 0 else len(self.x_history) - 1
+
+        if window < poly_order + 2:
+            return list(zip(self.x_history, self.y_history))
+
+        try:
+            x_arr = list(self.x_history)
+            y_arr = list(self.y_history)
+            x_smooth = savgol_filter(x_arr, window, poly_order)
+            y_smooth = savgol_filter(y_arr, window, poly_order)
+            return list(zip(x_smooth, y_smooth))
+        except Exception:
+            return list(zip(self.x_history, self.y_history))
+
+
+# Alias for seamless backwards compatibility across existing modules
+HybridBeeTracker = RobustBeeTracker
 
 
 class BeeYOLODetector:

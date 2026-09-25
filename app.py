@@ -86,6 +86,7 @@ from tracking_logic import (
     CameraThread,
     create_csrt_tracker,
     HybridBeeTracker,
+    RobustBeeTracker,
 )
 
 # ---------------------------------------------------------------------------
