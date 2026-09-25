@@ -571,10 +571,30 @@ def upsert_coord(coord, slot_idx=0):
     slot["track_coords"].sort(key=lambda c: c["frame"])
 
 
+def apply_ir_screen_filter(frame, ir_mode="Standard RGB Feed"):
+    if frame is None or ir_mode == "Standard RGB Feed":
+        return frame
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame.copy()
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+
+    if ir_mode == "IR CLAHE High-Contrast":
+        return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+    elif ir_mode == "IR Thermal Heatmap Screen":
+        return cv2.applyColorMap(enhanced, cv2.COLORMAP_JET)
+    elif ir_mode == "IR Inverted Heatmap Screen":
+        inv = cv2.bitwise_not(enhanced)
+        return cv2.cvtColor(inv, cv2.COLOR_GRAY2BGR)
+    return frame
+
+
 def render_player_frame(frame, coords_up_to_frame, markers, slot_idx=0, cur_center=None, status="idle"):
     slot = st.session_state.slots[slot_idx]
+    ir_mode = st.session_state.get("ir_screen_mode", "Standard RGB Feed")
+    base_frame = apply_ir_screen_filter(frame, ir_mode=ir_mode)
+
     vis = draw_calibration_overlay(
-        frame,
+        base_frame,
         slot["circle_center"][0],
         slot["circle_center"][1],
         slot["circle_radius"],
@@ -1772,6 +1792,13 @@ elif st.session_state.tab == "track":
                 value=st.session_state.get("auto_track_full_arena", True),
                 help="Auto-detect and track bee across full arena on live or recorded feed without waiting for manual Entry tag first. Entry/Exit tags can be set retroactively."
             )
+
+        st.session_state.ir_screen_mode = st.selectbox(
+            "📺 Live Camera & Video Screen Display Mode Switcher",
+            options=["Standard RGB Feed", "IR CLAHE High-Contrast", "IR Thermal Heatmap Screen", "IR Inverted Heatmap Screen"],
+            index=0,
+            help="Switch display screen mode for live IR camera feeds to view high-contrast infrared thermal or inverted tracking visualization."
+        )
         
         st.markdown("""
         **⌨️ Active Keyboard Shortcuts (Mac & Windows):**

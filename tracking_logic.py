@@ -48,8 +48,8 @@ class CameraThread:
     Non-blocking threaded camera reader that continuously grabs frames at 60 FPS 
     into a deque(maxlen=2). Main UI loop only pulls the latest frame to eliminate lag.
     """
-    def __init__(self, source=0):
-        self.source = source
+    def __init__(self, source=0, camera_idx=None):
+        self.source = camera_idx if camera_idx is not None else source
         self.cap = None
         self.buffer = collections.deque(maxlen=2)
         self.running = False
@@ -87,6 +87,10 @@ class CameraThread:
             if self.buffer:
                 return True, self.buffer[-1].copy()
         return False, None
+
+    def get_frame(self):
+        ok, frame = self.read_latest()
+        return frame if ok else None
 
     def stop(self):
         self.running = False
