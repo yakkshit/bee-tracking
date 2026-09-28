@@ -87,6 +87,8 @@ from tracking_logic import (
     create_csrt_tracker,
     HybridBeeTracker,
     RobustBeeTracker,
+    ByteBeeTracker,
+    get_bioquery_engine,
 )
 
 # ---------------------------------------------------------------------------
@@ -489,6 +491,14 @@ def init_track_state(frame, bbox, slot_idx=0):
 
     hybrid = HybridBeeTracker()
     hybrid.force_lock_on(frame, cx, cy, bbox_size=ib[2])
+
+    # Exclude the feeder (center dot) from blob detection
+    if slot.get("circle_center") and slot.get("scale_factor"):
+        fc_x, fc_y = slot["circle_center"]
+        scale = slot.get("scale_factor", 1.0)
+        feeder_r_px = slot.get("feeder_radius_mm", 40.0) / scale if scale else 50.0
+        hybrid.set_feeder_center(fc_x, fc_y, radius_px=max(40, feeder_r_px))
+
     slot["hybrid_tracker"] = hybrid
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -518,8 +528,15 @@ def track_single_frame(frame, state, settings, slot_idx=0):
     arena_center = slot.get("circle_center")
     arena_radius = slot.get("circle_radius")
 
+    # Keep feeder exclusion up-to-date (re-set each frame cheaply)
+    if arena_center and slot.get("scale_factor"):
+        scale = slot.get("scale_factor", 1.0)
+        feeder_r_px = slot.get("feeder_radius_mm", 40.0) / scale if scale else 50.0
+        hybrid.set_feeder_center(arena_center[0], arena_center[1], radius_px=max(40, feeder_r_px))
+
+    slot_fps = slot.get("tracking_fps") or 30.0
     center, bbox, status, tracker_state_str = hybrid.update(
-        frame, arena_center=arena_center, arena_radius=arena_radius
+        frame, arena_center=arena_center, arena_radius=arena_radius, fps=slot_fps
     )
 
     if center is None or status == "lost":
@@ -585,7 +602,111 @@ def apply_ir_screen_filter(frame, ir_mode="Standard RGB Feed"):
     elif ir_mode == "IR Inverted Heatmap Screen":
         inv = cv2.bitwise_not(enhanced)
         return cv2.cvtColor(inv, cv2.COLOR_GRAY2BGR)
+    elif ir_mode == "IR Red Filter":
+        # Red-channel only overlay — matches the physical red IR illumination seen in the image
+        bgr = frame.copy() if len(frame.shape) == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        # Boost red channel, suppress blue/green
+        red_img = np.zeros_like(bgr)
+        # Apply CLAHE to luma to recover bee contrast under red light
+        yuv = cv2.cvtColor(bgr, cv2.COLOR_BGR2YUV)
+        yuv[:, :, 0] = clahe.apply(yuv[:, :, 0])
+        bgr_cl = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
+        red_img[:, :, 2] = bgr_cl[:, :, 2]  # red channel only
+        red_img[:, :, 1] = (bgr_cl[:, :, 1].astype(np.uint16) * 30 // 100).astype(np.uint8)  # faint green
+        return red_img
     return frame
+
+
+def _draw_tracking_hud(vis, cur_center, status, confidence, slot, frame_count=0):
+    """
+    Draw a comprehensive real-time tracking HUD:
+    - Animated crosshair at bee position with colour-coded confidence ring
+    - Confidence bar (top-left)
+    - Strategy/status label
+    - 'AUTO TRACKING' pulsing banner
+    """
+    h, w = vis.shape[:2]
+
+    # ---- Determine colours and labels by status ----
+    if status in ("ok",):
+        ring_col   = (0, 255, 80)    # bright green
+        dot_col    = (0, 255, 80)
+        label_col  = (0, 255, 80)
+        status_txt = "AUTO TRACKING"
+    elif status in ("weak", "manual"):
+        ring_col   = (0, 200, 255)   # amber/cyan
+        dot_col    = (0, 200, 255)
+        label_col  = (0, 200, 255)
+        status_txt = "TRACKING (WEAK)"
+    else:
+        ring_col   = (50, 50, 255)   # red
+        dot_col    = (50, 50, 255)
+        label_col  = (50, 50, 255)
+        status_txt = "SEARCHING"
+
+    # ---- Pulsing outer ring radius (animates every ~0.5s) ----
+    pulse = int(frame_count % 20)
+    outer_r = 20 + (pulse if pulse < 10 else 20 - pulse)   # oscillates 20..30
+
+    if cur_center:
+        cx, cy = int(cur_center[0]), int(cur_center[1])
+
+        # Outer pulsing ring
+        cv2.circle(vis, (cx, cy), outer_r, ring_col, 2, cv2.LINE_AA)
+        # Middle confirmation ring
+        cv2.circle(vis, (cx, cy), 14, ring_col, 1, cv2.LINE_AA)
+        # Inner filled dot
+        cv2.circle(vis, (cx, cy), 5, dot_col, -1, cv2.LINE_AA)
+
+        # Crosshair lines (short gaps around the dot)
+        gap, arm = 8, 18
+        cv2.line(vis, (cx - arm, cy), (cx - gap, cy), ring_col, 1, cv2.LINE_AA)
+        cv2.line(vis, (cx + gap, cy), (cx + arm, cy), ring_col, 1, cv2.LINE_AA)
+        cv2.line(vis, (cx, cy - arm), (cx, cy - gap), ring_col, 1, cv2.LINE_AA)
+        cv2.line(vis, (cx, cy + gap), (cx, cy + arm), ring_col, 1, cv2.LINE_AA)
+
+        # Confidence label next to dot
+        conf_pct = int(confidence * 100) if confidence else 0
+        cv2.putText(vis, f"{conf_pct}%", (cx + outer_r + 4, cy - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, label_col, 1, cv2.LINE_AA)
+
+    # ---- Status banner (top-left corner) ----
+    # Semi-transparent background rectangle
+    banner_h = 56
+    overlay = vis.copy()
+    cv2.rectangle(overlay, (0, 0), (280, banner_h), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.45, vis, 0.55, 0, vis)
+
+    # Pulsing dot before text (blink on "ok")
+    blink_on = (frame_count % 16) < 8
+    if blink_on and status == "ok":
+        cv2.circle(vis, (14, 14), 6, (0, 255, 80), -1, cv2.LINE_AA)
+    elif status == "weak":
+        cv2.circle(vis, (14, 14), 6, (0, 200, 255), -1, cv2.LINE_AA)
+    else:
+        cv2.circle(vis, (14, 14), 6, (50, 50, 255), -1, cv2.LINE_AA)
+
+    cv2.putText(vis, status_txt, (26, 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, label_col, 1, cv2.LINE_AA)
+
+    # Confidence bar
+    conf_val = confidence if confidence else 0.0
+    bar_x, bar_y, bar_w, bar_h2 = 8, 28, 130, 8
+    cv2.rectangle(vis, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h2), (60, 60, 60), -1)
+    fill_w = max(0, int(bar_w * conf_val))
+    bar_fill_col = (0, 255, 80) if conf_val > 0.6 else (0, 200, 255) if conf_val > 0.3 else (50, 50, 255)
+    if fill_w > 0:
+        cv2.rectangle(vis, (bar_x, bar_y), (bar_x + fill_w, bar_y + bar_h2), bar_fill_col, -1)
+    cv2.rectangle(vis, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h2), (120, 120, 120), 1)
+    cv2.putText(vis, f"Conf {int(conf_val*100)}%", (bar_x + bar_w + 6, bar_y + 7),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1, cv2.LINE_AA)
+
+    # Points count
+    n_pts = len(slot.get("track_coords", []))
+    cv2.putText(vis, f"Pts: {n_pts}", (8, 50),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (180, 180, 180), 1, cv2.LINE_AA)
+
+    return vis
 
 
 def render_player_frame(frame, coords_up_to_frame, markers, slot_idx=0, cur_center=None, status="idle"):
@@ -602,20 +723,37 @@ def render_player_frame(frame, coords_up_to_frame, markers, slot_idx=0, cur_cent
         outer_radius_mm=slot.get("outer_radius_mm", 420.0),
         inner_radius_mm=slot.get("inner_radius_mm", 210.0)
     )
+
+    # Draw trajectory path — colour-coded by tracking quality
     if len(coords_up_to_frame) > 1:
-        pts = np.array([[int(c["x_pixel"]), int(c["y_pixel"])] for c in coords_up_to_frame], np.int32).reshape((-1, 1, 2))
-        cv2.polylines(vis, [pts], False, (0, 200, 255), 2)
+        for i in range(1, len(coords_up_to_frame)):
+            c0 = coords_up_to_frame[i - 1]
+            c1 = coords_up_to_frame[i]
+            p0 = (int(c0["x_pixel"]), int(c0["y_pixel"]))
+            p1 = (int(c1["x_pixel"]), int(c1["y_pixel"]))
+            seg_status = c1.get("status", "ok")
+            seg_col = (0, 220, 100) if seg_status == "ok" else (0, 180, 255) if seg_status in ("weak", "manual") else (60, 60, 255)
+            cv2.line(vis, p0, p1, seg_col, 2, cv2.LINE_AA)
 
     for m in markers:
         mx, my, color, label = m
         cv2.drawMarker(vis, (int(mx), int(my)), color, cv2.MARKER_TILTED_CROSS, 18, 2)
         cv2.putText(vis, label, (int(mx) + 10, int(my) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
-    if cur_center:
-        cx, cy = int(cur_center[0]), int(cur_center[1])
-        col = (0, 255, 0) if status in ("ok", "idle") else (0, 180, 255) if status == "manual" else (0, 80, 255)
-        cv2.circle(vis, (cx, cy), 8, col, -1)
-        cv2.circle(vis, (cx, cy), 14, col, 2)
+    # Get tracking confidence from the hybrid tracker in this slot
+    hybrid = slot.get("hybrid_tracker")
+    confidence = getattr(hybrid, "confidence", 0.0) if hybrid else 0.0
+    frame_count = slot.get("player_frame", 0)
+
+    track_phase = slot.get("track_phase", "idle")
+    is_auto_tracking = track_phase in ("tracking",) and cur_center is not None
+
+    if is_auto_tracking or cur_center is not None:
+        vis = _draw_tracking_hud(vis, cur_center, status, confidence, slot, frame_count)
+    elif track_phase in ("paused_lost", "searching"):
+        # No lock — show SEARCHING banner with no dot
+        vis = _draw_tracking_hud(vis, None, "lost", 0.0, slot, frame_count)
+
     return vis
 
 
@@ -903,6 +1041,8 @@ def read_frame(video_path, frame_idx):
         frame = cam_thread.get_frame()
         if frame is None:
             return False, None
+        if st.session_state.get("flip_video_180", False):
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
         return True, frame
     cap = get_cap_handle(video_path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
@@ -912,6 +1052,8 @@ def read_frame(video_path, frame_idx):
         cap.open(safe_p)
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ok, frame = cap.read()
+    if ok and frame is not None and st.session_state.get("flip_video_180", False):
+        frame = cv2.rotate(frame, cv2.ROTATE_180)
     return ok, frame
 
 
@@ -988,6 +1130,8 @@ def apply_point_tag(px, py, tag_mode, frame, fps, slot_idx=0):
 
 def process_tracking_frame(frame, frame_idx, fps, settings, slot_idx=0):
     slot = st.session_state.slots[slot_idx]
+    is_live = slot["video_path"] == "live"
+
     if slot["track_state"] is None:
         if st.session_state.get("auto_track_full_arena", True) and slot.get("circle_center") and slot.get("circle_radius"):
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -1010,6 +1154,14 @@ def process_tracking_frame(frame, frame_idx, fps, settings, slot_idx=0):
                 slot["track_phase"] = "tracking"
                 slot["tracking_lost"] = False
             else:
+                if is_live:
+                    # Live: seed ensemble at arena center and keep loop running
+                    hybrid = slot.get("hybrid_tracker")
+                    if hybrid is None:
+                        hybrid = HybridBeeTracker()
+                        slot["hybrid_tracker"] = hybrid
+                    hybrid.initialize_background(frame)
+                    return True
                 return False
         else:
             return False
@@ -1017,19 +1169,29 @@ def process_tracking_frame(frame, frame_idx, fps, settings, slot_idx=0):
     state = slot["track_state"].copy()
     state["frame_idx"] = frame_idx
     center, _, status, new_state = track_single_frame(frame, state, settings, slot_idx)
+
     if center is None or status == "lost":
+        if is_live:
+            # Live feed: NEVER pause on lost — ensemble keeps trying each frame
+            slot["tracking_lost"] = False
+            return True
         slot["tracking_lost"] = True
         slot["track_phase"] = "paused_lost"
         return False
+
     cx, cy = center
     upsert_coord(make_coord(frame_idx, cx, cy, fps, slot_idx, tag_type="auto", status=status), slot_idx)
     slot["track_state"] = new_state
+    slot["tracking_lost"] = False
+    if slot["track_phase"] == "paused_lost":
+        slot["track_phase"] = "tracking"
 
-    # Online Continual Learning: Feed verified live tracking frames into self-training buffer
-    if frame_idx % 2 == 0:
+    # Online Continual Learning: Feed high-confidence frames into self-training buffer
+    if status == "ok" and frame_idx % 2 == 0:
         get_online_trainer().add_tracking_sample(frame, cx, cy, tag_type="auto", priority=False)
 
     return True
+
 
 
 # ---------------------------------------------------------------------------
@@ -1770,7 +1932,7 @@ elif st.session_state.tab == "track":
             st.rerun()
 
     with st.expander("⚙️ Tracking Config & Keyboard Hotkeys", expanded=False):
-        c_tr1, c_tr2, c_tr3 = st.columns(3)
+        c_tr1, c_tr2, c_tr3, c_tr4 = st.columns(4)
         with c_tr1:
             st.session_state.track_stride = st.slider(
                 "Frame Stride",
@@ -1792,12 +1954,18 @@ elif st.session_state.tab == "track":
                 value=st.session_state.get("auto_track_full_arena", True),
                 help="Auto-detect and track bee across full arena on live or recorded feed without waiting for manual Entry tag first. Entry/Exit tags can be set retroactively."
             )
+        with c_tr4:
+            st.session_state.flip_video_180 = st.checkbox(
+                "🔄 Flip 180° (Upsidedown Cam)",
+                value=st.session_state.get("flip_video_180", False),
+                help="Flips video / live camera feed 180 degrees if orientation is inverted."
+            )
 
         st.session_state.ir_screen_mode = st.selectbox(
             "📺 Live Camera & Video Screen Display Mode Switcher",
-            options=["Standard RGB Feed", "IR CLAHE High-Contrast", "IR Thermal Heatmap Screen", "IR Inverted Heatmap Screen"],
+            options=["Standard RGB Feed", "IR CLAHE High-Contrast", "IR Thermal Heatmap Screen", "IR Inverted Heatmap Screen", "IR Red Filter"],
             index=0,
-            help="Switch display screen mode for live IR camera feeds to view high-contrast infrared thermal or inverted tracking visualization."
+            help="Switch display screen mode for live IR camera feeds. 'IR Red Filter' matches the physical red IR illumination and boosts bee contrast."
         )
         
         st.markdown("""
@@ -2104,14 +2272,206 @@ elif st.session_state.tab == "track":
     with p5:
         st.markdown(f"**Playback Controls (Stepping targets Slot {active_slot+1})** | Speed: {stride} frames")
 
+    # --- Live Recording Controls ---
+    live_slots = [i for i in range(num_slots) if st.session_state.slots[i].get("video_path") == "live"]
+    if live_slots:
+        st.markdown("")
+        rec_c1, rec_c2, rec_c3 = st.columns([2, 3, 5])
+        with rec_c1:
+            is_recording = st.session_state.get("live_recording", False)
+            rec_label = "⏹ Stop Recording" if is_recording else "🔴 Record Live Feed"
+            rec_type  = "primary" if is_recording else "secondary"
+            if st.button(rec_label, type=rec_type, width="stretch",
+                         help="Start/Stop recording the annotated live feed and all multi-filter streams to an MP4 folder."):
+                if not is_recording:
+                    # ---- Start recording ----
+                    import datetime
+                    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    rec_slot_idx = live_slots[0]
+                    rec_slot = st.session_state.slots[rec_slot_idx]
+                    base_dir = rec_slot.get("results_dir") or "results"
+                    # Create a dedicated folder — one MP4 per filter
+                    rec_folder = os.path.join(base_dir, f"recording_{ts}")
+                    os.makedirs(rec_folder, exist_ok=True)
+                    # Primary annotated recording (current display filter)
+                    rec_path = os.path.join(rec_folder, f"annotated_{ts}.mp4")
+                    st.session_state["live_recording"]        = True
+                    st.session_state["live_rec_path"]         = rec_path
+                    st.session_state["live_rec_folder"]       = rec_folder
+                    st.session_state["live_rec_writer"]       = None  # initialised on first annotated frame
+                    st.session_state["live_rec_writers_all"]  = {}    # filter_key -> VideoWriter
+                    st.session_state["live_rec_slot_idx"]     = rec_slot_idx
+                    st.session_state["live_rec_frame_count"]  = 0
+                    st.session_state["live_rec_done_folder"]  = None
+                    st.session_state["live_rec_done_path"]    = None
+                else:
+                    # ---- Stop recording ----
+                    writers_all = st.session_state.get("live_rec_writers_all", {})
+                    for w in writers_all.values():
+                        try:
+                            w.release()
+                        except Exception:
+                            pass
+                    writer = st.session_state.get("live_rec_writer")
+                    if writer is not None:
+                        try:
+                            writer.release()
+                        except Exception:
+                            pass
+                    done_path = st.session_state.get("live_rec_path", "")
+                    done_folder = st.session_state.get("live_rec_folder", "")
+                    st.session_state["live_recording"]        = False
+                    st.session_state["live_rec_writer"]       = None
+                    st.session_state["live_rec_writers_all"]  = {}
+                    st.session_state["live_rec_done_path"]    = done_path
+                    st.session_state["live_rec_done_folder"]  = done_folder
+                st.rerun()
+
+        with rec_c2:
+            if st.session_state.get("live_recording", False):
+                n_frames = st.session_state.get("live_rec_frame_count", 0)
+                rec_fps   = st.session_state.slots[live_slots[0]].get("tracking_fps", 30.0) or 30.0
+                elapsed_s = n_frames / rec_fps
+                m, s = divmod(int(elapsed_s), 60)
+                # Pulsing REC badge via HTML
+                st.markdown(
+                    f"""<div style='display:flex;align-items:center;gap:8px;margin-top:6px'>
+                    <span style='width:12px;height:12px;border-radius:50%;background:#E63946;
+                        display:inline-block;animation:blink 1s step-start infinite;'></span>
+                    <span style='font-weight:600;color:#E63946;font-family:monospace'>REC&nbsp;"""
+                    f"{m:02d}:{s:02d}&nbsp;·&nbsp;{n_frames} frames (Multi-Filter)</span></div>"
+                    """<style>@keyframes blink{50%{opacity:0}}</style>""",
+                    unsafe_allow_html=True
+                )
+
+        with rec_c3:
+            done_fold = st.session_state.get("live_rec_done_folder")
+            done = st.session_state.get("live_rec_done_path")
+            if done_fold and os.path.exists(done_fold):
+                mp4_files = sorted([f for f in os.listdir(done_fold) if f.endswith(".mp4")])
+                st.success(f"✅ Saved {len(mp4_files)} multi-filter recordings in `{os.path.basename(done_fold)}`")
+                # Grid of download buttons
+                if mp4_files:
+                    cols_dl = st.columns(min(len(mp4_files), 4))
+                    for idx_f, m_file in enumerate(mp4_files):
+                        fpath = os.path.join(done_fold, m_file)
+                        btn_label = "⬇️ " + m_file.replace(".mp4", "").split("_")[0].capitalize()
+                        with open(fpath, "rb") as f:
+                            cols_dl[idx_f % len(cols_dl)].download_button(
+                                btn_label,
+                                data=f,
+                                file_name=m_file,
+                                mime="video/mp4",
+                                key=f"dl_rec_{m_file}",
+                            )
+            elif done and os.path.exists(done):
+                fsize_mb = os.path.getsize(done) / (1024 * 1024)
+                st.success(f"✅ Saved: `{os.path.basename(done)}` ({fsize_mb:.1f} MB)")
+                with open(done, "rb") as f:
+                    st.download_button(
+                        "⬇️ Download Annotated MP4",
+                        data=f,
+                        file_name=os.path.basename(done),
+                        mime="video/mp4",
+                        key=f"dl_rec_{done}",
+                    )
+
+    # --- BioQuery V1: Real-Time Micro-Kinematics & Behavioral Ethogram (V1.pdf) ---
+    st.markdown("---")
+    with st.expander("🧬 BioQuery (V1): Micro-Kinematics Telemetry & Behavioral Ethogram Query", expanded=True):
+        bq_col1, bq_col2 = st.columns([1, 1])
+        bq_engine = get_bioquery_engine()
+
+        # Extract current micro-kinematics from active slot's hybrid tracker
+        active_slot_idx = st.session_state.active_slot
+        active_slot_obj = st.session_state.slots[active_slot_idx]
+        ht = active_slot_obj.get("hybrid_tracker")
+        mk = ht.micro_kinematics if ht and hasattr(ht, "micro_kinematics") else {
+            "v": 0.0, "a": 0.0, "omega": 0.0, "heading": 0.0, "immobile_sec": 0.0, "jitter_score": 0.0
+        }
+
+        with bq_col1:
+            st.markdown("##### ⚡ Stage 1: Micro-Kinematics Telemetry")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Velocity (v)", f"{mk.get('v', 0.0):.1f} px/s")
+            m2.metric("Acceleration (a)", f"{mk.get('a', 0.0):.1f} px/s²")
+            m3.metric("Turning Rate (ω)", f"{mk.get('omega', 0.0):.0f}°/s")
+            m4.metric("Pause Duration", f"{mk.get('immobile_sec', 0.0):.1f} s")
+
+            # Real-time state badges
+            state_badges = []
+            if mk.get('immobile_sec', 0.0) >= 3.0:
+                state_badges.append("🛑 Sustained Immobility (Foraging/Resting)")
+            if mk.get('jitter_score', 0.0) > 0.6:
+                state_badges.append("⚠️ High-Frequency Micro-Jitter (Varroa/Erratic Marker)")
+            if not state_badges:
+                state_badges.append("✅ Nominal Locomotion")
+
+            st.markdown(f"**Kinematic State:** `{' | '.join(state_badges)}`")
+
+        with bq_col2:
+            st.markdown("##### 💬 Stage 3: Natural Language Behavioral Query (BioQuery)")
+            q_input = st.text_input(
+                "Ask a biological question (e.g. 'Show erratic movement', 'Waggle dance', 'Resting > 3s', 'Trophallaxis'):",
+                key="bioquery_user_query",
+                placeholder="e.g. Show all erratic movement events"
+            )
+            if q_input:
+                res = bq_engine.query(q_input)
+                st.info(f"**BioQuery Response:** {res['answer']}")
+                if res["matched_events"]:
+                    st.dataframe(
+                        pd.DataFrame(res["matched_events"])[["event_id", "timestamp", "behavior_class", "confidence", "description"]],
+                        height=130,
+                        use_container_width=True
+                    )
+
+        # Ethogram log table
+        if bq_engine.ethogram_log:
+            st.markdown("##### 📋 Stage 2: Auto-Generated Behavioral Ethogram Log")
+            df_etho = pd.DataFrame(bq_engine.ethogram_log)
+            st.dataframe(
+                df_etho[["event_id", "timestamp", "track_id", "behavior_class", "confidence", "description", "biological_notes"]],
+                height=150,
+                use_container_width=True
+            )
+
+            d1, d2 = st.columns([1, 1])
+            with d1:
+                import json
+                st.download_button(
+                    "⬇️ Export Ethogram (JSON)",
+                    data=json.dumps(bq_engine.ethogram_log, indent=2),
+                    file_name="bioquery_ethogram.json",
+                    mime="application/json",
+                    key="dl_etho_json"
+                )
+            with d2:
+                st.download_button(
+                    "⬇️ Export Ethogram (CSV)",
+                    data=df_etho.to_csv(index=False),
+                    file_name="bioquery_ethogram.csv",
+                    mime="text/csv",
+                    key="dl_etho_csv"
+                )
+
     # --- Live tracking engine (synchronized concurrent frame loops) ---
     if st.session_state.is_playing:
         any_advanced = False
         for idx in range(num_slots):
             slot = st.session_state.slots[idx]
-            if not slot["video_path"] or slot["track_state"] is None:
+            if not slot["video_path"]:
                 continue
-            if slot["track_phase"] != "tracking" or slot["tracking_lost"]:
+            is_live_slot = slot["video_path"] == "live"
+            # For live feeds: allow loop even without track_state (ensemble auto-detects)
+            if not is_live_slot and slot["track_state"] is None:
+                continue
+            # For live feeds: tracking_lost never stops the loop
+            if slot["track_phase"] not in ("tracking", "idle", "paused_lost"):
+                continue
+            if not is_live_slot and slot["tracking_lost"]:
+                continue
+            if slot["track_phase"] == "idle" and not is_live_slot:
                 continue
 
             slot_meta = video_meta(slot["video_path"])
@@ -2141,22 +2501,72 @@ elif st.session_state.tab == "track":
 
             ok_n, frame_n = read_frame(slot["video_path"], next_f)
             if ok_n:
-                if slot["video_path"] == "live":
-                    if "live_writer" not in slot or slot["live_writer"] is None:
-                        os.makedirs(slot["results_dir"], exist_ok=True)
-                        raw_path = os.path.join(slot["results_dir"], "raw_feed.mp4")
-                        slot["live_writer"] = cv2.VideoWriter(raw_path, cv2.VideoWriter_fourcc(*'mp4v'), 30, (frame_n.shape[1], frame_n.shape[0]))
-                    slot["live_writer"].write(frame_n)
-
                 slot_fps = slot.get("tracking_fps") or slot_meta["fps"] or 30.0
-                if process_tracking_frame(frame_n, next_f, slot_fps, settings, idx):
-                    slot["player_frame"] = next_f
-                    slot["last_player_frame"] = next_f
-                    any_advanced = True
-                else:
-                    slot["player_frame"] = next_f
-                    slot["last_player_frame"] = next_f
-                    any_advanced = True
+
+                # ---- Build annotated frame for recording ----
+                if is_live_slot:
+                    slot_coords_now = slot["track_coords"]
+                    coord_now = next((c for c in slot_coords_now if c["frame"] == next_f), None)
+                    coords_vis_now = sorted([c for c in slot_coords_now if c["frame"] <= next_f], key=lambda c: c["frame"])
+                    markers_now = []
+                    if slot.get("entry_point"):       markers_now.append((*slot["entry_point"],       (42, 157, 143), "ENTRY"))
+                    if slot.get("exit_point"):        markers_now.append((*slot["exit_point"],        (230, 57, 70),  "EXIT"))
+                    if slot.get("analysis_end_point"): markers_now.append((*slot["analysis_end_point"], (255, 183, 77), "END"))
+                    cc_now  = (coord_now["x_pixel"], coord_now["y_pixel"]) if coord_now else None
+                    cs_now  = coord_now.get("status", "ok") if coord_now else "idle"
+                    if slot.get("circle_center"):
+                        ann_frame = render_player_frame(frame_n, coords_vis_now, markers_now, idx, cc_now, cs_now)
+                    else:
+                        ann_frame = frame_n
+
+                    # ---- Write to recording if active ----
+                    is_rec_active = (st.session_state.get("live_recording", False)
+                                     and st.session_state.get("live_rec_slot_idx") == idx)
+                    if is_rec_active:
+                        rec_folder = st.session_state.get("live_rec_folder", "")
+                        ts_str = os.path.basename(rec_folder).replace("recording_", "") if rec_folder else "live"
+                        rec_fps_w = max(1.0, slot_fps)
+                        h_r, w_r = ann_frame.shape[:2]
+
+                        # 1. Primary annotated writer (display HUD + path)
+                        writer = st.session_state.get("live_rec_writer")
+                        if writer is None:
+                            rec_path = st.session_state.get("live_rec_path", os.path.join(rec_folder, f"annotated_{ts_str}.mp4"))
+                            writer = cv2.VideoWriter(rec_path, cv2.VideoWriter_fourcc(*'mp4v'), rec_fps_w, (w_r, h_r))
+                            st.session_state["live_rec_writer"] = writer
+                        if writer is not None and writer.isOpened():
+                            writer.write(ann_frame)
+
+                        # 2. Multi-filter simultaneous video streams
+                        FILTER_MAP = {
+                            "raw_standard": "Standard RGB Feed",
+                            "ir_clahe": "IR CLAHE High-Contrast",
+                            "ir_thermal": "IR Thermal Heatmap Screen",
+                            "ir_inverted": "IR Inverted Heatmap Screen",
+                            "ir_red": "IR Red Filter",
+                        }
+                        writers_all = st.session_state.get("live_rec_writers_all", {})
+                        for f_key, f_mode in FILTER_MAP.items():
+                            if f_key not in writers_all or writers_all[f_key] is None:
+                                f_out_path = os.path.join(rec_folder, f"{f_key}_{ts_str}.mp4")
+                                w_obj = cv2.VideoWriter(f_out_path, cv2.VideoWriter_fourcc(*'mp4v'), rec_fps_w, (w_r, h_r))
+                                writers_all[f_key] = w_obj
+                            w_obj = writers_all.get(f_key)
+                            if w_obj is not None and w_obj.isOpened():
+                                filt_img = apply_ir_screen_filter(frame_n, ir_mode=f_mode)
+                                if filt_img.shape[:2] != (h_r, w_r):
+                                    filt_img = cv2.resize(filt_img, (w_r, h_r))
+                                w_obj.write(filt_img)
+
+                        st.session_state["live_rec_writers_all"] = writers_all
+                        st.session_state["live_rec_frame_count"] = (
+                            st.session_state.get("live_rec_frame_count", 0) + 1
+                        )
+
+                process_tracking_frame(frame_n, next_f, slot_fps, settings, idx)
+                slot["player_frame"] = next_f
+                slot["last_player_frame"] = next_f
+                any_advanced = True
             else:
                 slot["track_phase"] = "complete"
                 if "live_writer" in slot and slot["live_writer"] is not None:
