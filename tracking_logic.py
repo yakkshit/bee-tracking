@@ -352,10 +352,231 @@ class MultiStrategyDetector:
 
     def reset_optical_flow(self, pos=None):
         self.lk_pts = None
-        self.lk_prev_gray = None
-        if pos is not None:
-            cx, cy = pos
-            self.lk_pts = np.array([[[float(cx), float(cy)]]], dtype=np.float32)
+    def get_candidate_detections(self, frame, min_area=15, max_area=2500,
+                                  arena_center=None, arena_radius=None, last_pos=None):
+        """
+        Comprehensive Multi-Strategy Object Detector for Honeybee Tracking.
+        Extracts candidate bounding boxes across:
+          1. YOLOv11 Neural Object Detector (if available)
+          2. MOG2 Background Subtraction (dynamic motion foreground)
+          3. Same-exposure Frame Differencing (instant motion detection)
+          4. Adaptive Contrast / Dark-Object Segmentation (stationary/slow-moving bees under IR)
+          5. Lucas-Kanade Sparse Optical Flow (motion continuity)
+
+        Returns list of tuples: (x1, y1, x2, y2, score, feat_type)
+        """
+        if frame is None:
+            return []
+
+        h_f, w_f = frame.shape[:2]
+        candidates = []
+
+        # -------------------------------------------------------------
+        # 1. YOLOv11 Neural Object Detector
+        # -------------------------------------------------------------
+        try:
+            ydet = get_yolo_detector()
+            if ydet and ydet.model is not None:
+                roi = None
+                if arena_center and arena_radius:
+                    ax, ay = int(arena_center[0]), int(arena_center[1])
+                    ar = int(arena_radius + 30)
+                    roi = (max(0, ax - ar), max(0, ay - ar), min(w_f, ar * 2), min(h_f, ar * 2))
+
+                # Fast inference
+                target_img = frame if roi is None else frame[roi[1]:roi[1]+roi[3], roi[0]:roi[0]+roi[2]]
+                if target_img.size > 0:
+                    with ydet._lock:
+                        res = ydet.model.predict(target_img, conf=0.15, verbose=False)
+                    if res and len(res) > 0 and len(res[0].boxes) > 0:
+                        boxes = res[0].boxes
+                        off_x = roi[0] if roi else 0
+                        off_y = roi[1] if roi else 0
+                        for b_idx in range(len(boxes)):
+                            xyxy = boxes.xyxy[b_idx].cpu().numpy()
+                            c_val = float(boxes.conf[b_idx].cpu().numpy())
+                            bx1, by1, bx2, by2 = float(xyxy[0] + off_x), float(xyxy[1] + off_y), float(xyxy[2] + off_x), float(xyxy[3] + off_y)
+                            bcx = (bx1 + bx2) / 2.0
+                            bcy = (by1 + by2) / 2.0
+
+                            # Feeder check
+                            if self.feeder_center is not None:
+                                fc_x, fc_y = self.feeder_center
+                                if np.hypot(bcx - fc_x, bcy - fc_y) < self.feeder_radius:
+                                    continue
+                            # Arena check
+                            if arena_center and arena_radius:
+                                ax, ay = arena_center
+                                if np.hypot(bcx - ax, bcy - ay) > arena_radius + 40:
+                                    continue
+
+                            candidates.append((bx1, by1, bx2, by2, max(0.40, c_val), "yolo"))
+        except Exception:
+            pass
+
+        # -------------------------------------------------------------
+        # 2. MOG2 Motion Foreground Blobs
+        # -------------------------------------------------------------
+        try:
+            blurred = self._to_denoised(frame)
+            fg = self.bg_sub.apply(blurred)
+            self.bg_frame_count += 1
+
+            if self.bg_frame_count >= self.bg_warmup_frames:
+                k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, k, iterations=2)
+                fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k, iterations=3)
+
+                contours, _ = cv2.findContours(fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for c in contours:
+                    area = cv2.contourArea(c)
+                    if min_area <= area <= max_area:
+                        x, y, w, h = cv2.boundingRect(c)
+                        cx, cy = x + w / 2.0, y + h / 2.0
+
+                        if self.feeder_center is not None:
+                            fc_x, fc_y = self.feeder_center
+                            if np.hypot(cx - fc_x, cy - fc_y) < self.feeder_radius:
+                                continue
+                        if arena_center and arena_radius:
+                            ax, ay = arena_center
+                            if np.hypot(cx - ax, cy - ay) > arena_radius + 40:
+                                continue
+
+                        score = min(0.85, 0.45 + (area / 800.0) * 0.35)
+                        candidates.append((float(x), float(y), float(x + w), float(y + h), score, "mog2"))
+        except Exception:
+            pass
+
+        # -------------------------------------------------------------
+        # 3. Same-Exposure Frame Differencing
+        # -------------------------------------------------------------
+        try:
+            blurred = self._to_denoised(frame)
+            self.frame_buffer.append(blurred)
+            if len(self.frame_buffer) >= 3:
+                prev = self.frame_buffer[-3]
+                diff = cv2.absdiff(prev, blurred)
+                _, thresh = cv2.threshold(diff, 22, 255, cv2.THRESH_BINARY)
+                k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, k, iterations=1)
+                thresh = cv2.morphologyEx(thresh, cv2.MORPH_DILATE, k, iterations=3)
+
+                contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for c in contours:
+                    area = cv2.contourArea(c)
+                    if min_area <= area <= max_area:
+                        x, y, w, h = cv2.boundingRect(c)
+                        cx, cy = x + w / 2.0, y + h / 2.0
+
+                        if self.feeder_center is not None:
+                            fc_x, fc_y = self.feeder_center
+                            if np.hypot(cx - fc_x, cy - fc_y) < self.feeder_radius:
+                                continue
+                        if arena_center and arena_radius:
+                            ax, ay = arena_center
+                            if np.hypot(cx - ax, cy - ay) > arena_radius + 40:
+                                continue
+
+                        score = min(0.80, 0.40 + (area / 700.0) * 0.35)
+                        candidates.append((float(x), float(y), float(x + w), float(y + h), score, "frame_diff"))
+        except Exception:
+            pass
+
+        # -------------------------------------------------------------
+        # 4. Adaptive Contrast & Dark-Spot Object Segmentation
+        # -------------------------------------------------------------
+        try:
+            gray_cl = self._to_gray_clahe(frame)
+            # Black-hat filter highlights dark elements on bright/medium background
+            k_bh = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+            blackhat = cv2.morphologyEx(gray_cl, cv2.MORPH_BLACKHAT, k_bh)
+            _, dark_mask = cv2.threshold(blackhat, 28, 255, cv2.THRESH_BINARY)
+
+            contours_d, _ = cv2.findContours(dark_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for c in contours_d:
+                area = cv2.contourArea(c)
+                if min_area <= area <= max_area:
+                    x, y, w, h = cv2.boundingRect(c)
+                    cx, cy = x + w / 2.0, y + h / 2.0
+
+                    if self.feeder_center is not None:
+                        fc_x, fc_y = self.feeder_center
+                        if np.hypot(cx - fc_x, cy - fc_y) < self.feeder_radius:
+                            continue
+                    if arena_center and arena_radius:
+                        ax, ay = arena_center
+                        if np.hypot(cx - ax, cy - ay) > arena_radius + 40:
+                            continue
+
+                    # Higher score if closer to last position (if tracking)
+                    score = 0.45
+                    if last_pos is not None:
+                        d = np.hypot(cx - last_pos[0], cy - last_pos[1])
+                        if d < 100:
+                            score = 0.65 - (d / 200.0) * 0.2
+
+                    candidates.append((float(x), float(y), float(x + w), float(y + h), score, "contrast_blob"))
+        except Exception:
+            pass
+
+        # -------------------------------------------------------------
+        # 5. Lucas-Kanade Optical Flow Candidate
+        # -------------------------------------------------------------
+        if last_pos is not None:
+            try:
+                lk_pos = self.detect_optical_flow(frame, last_pos)
+                if lk_pos is not None:
+                    bw, bh = 38.0, 38.0
+                    candidates.append((
+                        float(lk_pos[0] - bw/2), float(lk_pos[1] - bh/2),
+                        float(lk_pos[0] + bw/2), float(lk_pos[1] + bh/2),
+                        0.55, "optical_flow"
+                    ))
+            except Exception:
+                pass
+
+        # Non-Maximum Suppression (NMS) on candidates to remove redundant duplicates
+        if len(candidates) > 1:
+            candidates = self._apply_nms(candidates, iou_thresh=0.45)
+
+        return candidates
+
+    def _apply_nms(self, boxes_with_scores, iou_thresh=0.45):
+        """Non-Maximum Suppression (NMS) over candidate detections."""
+        if not boxes_with_scores:
+            return []
+
+        boxes = np.array([[b[0], b[1], b[2], b[3]] for b in boxes_with_scores], dtype=np.float32)
+        scores = np.array([b[4] for b in boxes_with_scores], dtype=np.float32)
+
+        x1 = boxes[:, 0]
+        y1 = boxes[:, 1]
+        x2 = boxes[:, 2]
+        y2 = boxes[:, 3]
+        areas = (x2 - x1) * (y2 - y1)
+        order = scores.argsort()[::-1]
+
+        keep = []
+        while order.size > 0:
+            i = order[0]
+            keep.append(i)
+
+            xx1 = np.maximum(x1[i], x1[order[1:]])
+            yy1 = np.maximum(y1[i], y1[order[1:]])
+            xx2 = np.minimum(x2[i], x2[order[1:]])
+            yy2 = np.minimum(y2[i], y2[order[1:]])
+
+            w = np.maximum(0.0, xx2 - xx1)
+            h = np.maximum(0.0, yy2 - yy1)
+            inter = w * h
+            union = areas[i] + areas[order[1:]] - inter
+            iou = inter / np.maximum(1e-6, union)
+
+            inds = np.where(iou <= iou_thresh)[0]
+            order = order[inds + 1]
+
+        return [boxes_with_scores[k] for k in keep]
 
     def _best_blob(self, contours, min_area, max_area, last_pos, arena_center, arena_radius):
         valid = []
@@ -1185,8 +1406,18 @@ class RobustBeeTracker:
 
         h_f, w_f = frame.shape[:2]
 
-        # Gather candidate detections across all strategies
+        # Gather candidate detections across all strategies (YOLO, MOG2, Frame Diff, Contrast Blobs, Optical Flow)
         detections = []
+
+        raw_candidates = self.ensemble.get_candidate_detections(
+            frame, min_area=self.min_area, max_area=self.max_area,
+            arena_center=arena_center, arena_radius=arena_radius,
+            last_pos=self.last_position
+        )
+        for c in raw_candidates:
+            w = max(12.0, float(c[2] - c[0]))
+            h = max(12.0, float(c[3] - c[1]))
+            detections.append(STrack([float(c[0]), float(c[1]), w, h], float(c[4]), feat_type=c[5]))
 
         # 1. CSRT Candidate (if locked on)
         csrt_pos = None
@@ -1198,7 +1429,7 @@ class RobustBeeTracker:
                     cx, cy = x + bw / 2.0, y + bh / 2.0
                     if 0 <= cx < w_f and 0 <= cy < h_f:
                         csrt_pos = (cx, cy)
-                        detections.append(STrack([x, y, bw, bh], 0.85, feat_type="csrt"))
+                        detections.append(STrack([x, y, bw, bh], 0.90, feat_type="csrt"))
                         self.csrt_fail_count = 0
                     else:
                         self.csrt_fail_count += 1
@@ -1206,42 +1437,6 @@ class RobustBeeTracker:
                     self.csrt_fail_count += 1
             except Exception:
                 self.csrt_fail_count += 1
-
-        # 2. MOG2 Candidate
-        mog2_pos = self.ensemble.detect_mog2(
-            frame, self.min_area, self.max_area, self.last_position, arena_center, arena_radius
-        )
-        if mog2_pos is not None:
-            bw = self.last_bbox[2] if self.last_bbox else 38.0
-            bh = self.last_bbox[3] if self.last_bbox else 38.0
-            detections.append(STrack([mog2_pos[0] - bw/2, mog2_pos[1] - bh/2, bw, bh], 0.65, feat_type="mog2"))
-
-        # 3. Frame-Diff Candidate (instant same-exposure frame diff)
-        diff_pos = self.ensemble.detect_frame_diff(
-            frame, self.min_area, self.max_area, self.last_position, arena_center, arena_radius
-        )
-        if diff_pos is not None:
-            bw = self.last_bbox[2] if self.last_bbox else 38.0
-            bh = self.last_bbox[3] if self.last_bbox else 38.0
-            detections.append(STrack([diff_pos[0] - bw/2, diff_pos[1] - bh/2, bw, bh], 0.55, feat_type="frame_diff"))
-
-        # 4. Lucas-Kanade Optical Flow
-        if self.last_position is not None:
-            lk_pos = self.ensemble.detect_optical_flow(frame, self.last_position)
-            if lk_pos is not None:
-                bw = self.last_bbox[2] if self.last_bbox else 38.0
-                bh = self.last_bbox[3] if self.last_bbox else 38.0
-                detections.append(STrack([lk_pos[0] - bw/2, lk_pos[1] - bh/2, bw, bh], 0.50, feat_type="optical_flow"))
-
-        # 5. Dark-spot search (fallback ROI only)
-        if not detections and self.last_position is not None:
-            dark_pos = self.ensemble.detect_dark_spot(
-                frame, self.last_position, arena_center, arena_radius, search_radius=120
-            )
-            if dark_pos is not None:
-                bw = self.last_bbox[2] if self.last_bbox else 38.0
-                bh = self.last_bbox[3] if self.last_bbox else 38.0
-                detections.append(STrack([dark_pos[0] - bw/2, dark_pos[1] - bh/2, bw, bh], 0.30, feat_type="dark_spot"))
 
         # Run ByteTrack Update
         active_tracks, new_triggers = self.byte_tracker.update(
